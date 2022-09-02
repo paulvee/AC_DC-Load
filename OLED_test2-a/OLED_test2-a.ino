@@ -55,6 +55,7 @@ unsigned long firstTime; // how long since the button was first pressed
             //   enter via VAMode, exit via double-click
   ASMode    // Ampere setting Mode
             //   enter via VAMode, exit via double-click
+  // needs to be expanded/changed to cover the CC, VC, CW, CR and Batt modes
  };
 
 enum menu menuState;
@@ -87,15 +88,21 @@ int v_line = 30;    // Volt/Watt/Ohm line
 int a_line = 65;    // Amp line
 int menu_line = 100; // Menu line
 int stat_line = 118; // Status line
+// Col starting positions for the 5 digits
+int digit_1 = 0;
+int digit_2 = 20;
+int digit_3 = 45;
+int digit_4 = 66;
+int digit_5 = 86;
 
-// used to address the individual digits in the V/I//RW lines
-int pos = 4; // 5 digits, pos 1 is LSB of 88.888
+// used to address the individual digits in the V/I/R/W lines
+int pos = 4; // 5 digits, pos 1 is MSB of 88.888
 // placeholders for the original values for each digit
-int old_enc_pos_1 = 0; 
-int old_enc_pos_2 = 0;
-int old_enc_pos_3 = 0;
-int old_enc_pos_4 = 0;
-int old_enc_pos_5 = 0;
+int prev_val_digit_1 = 0; 
+int prev_val_digit_2 = 0;
+int prev_val_digit_3 = 0;
+int prev_val_digit_4 = 0;
+int prev_val_digit_5 = 0;
 
 
 /*
@@ -191,7 +198,7 @@ void loop(){
 
 /*
  * Move from digit to digit in the V/A line.
- * Moves are going up and down from 1-2-3-4-5-4-3-2-1 through the line
+ * Moves are going up and down from digits 1-2-3-4-5-4-3-2-1 through the line
  * The selected digit field is made black, which is the background, to make place
  * for a new value selected by the rotary switch.
  * 
@@ -200,27 +207,28 @@ void loop(){
 void digitClear(){
   switch (pos) { // encoder rotating changes the value of the selected digit/position
     case 1:
-      tft.fillRect(0, 16, 20, 26, BLACK); // define a black rectangular the size of a digit
+      tft.fillRect(digit_1, 5, 20, 27, BLACK); // define a black rectangular the size of a digit
+      // Fill starting from col 0, row 5 until row 20, col 27
       tft.setCursor(0, v_line);           // go to the right position of the digit
       tft.print(String(encoderPos));      // black it out
       break;
     case 2:
-      tft.fillRect(20, 16, 20, 26, BLACK);
+      tft.fillRect(digit_2, 5, 20, 27, BLACK);
       tft.setCursor(20, v_line);
       tft.print(String(encoderPos));
       break;
     case 3:
-      tft.fillRect(45, 16, 20, 26, BLACK);
+      tft.fillRect(digit_3, 5, 20, 27, BLACK);
       tft.setCursor(45, v_line);
       tft.print(String(encoderPos));
       break;
     case 4:
-      tft.fillRect(66, 16, 20, 26, BLACK);
+      tft.fillRect(digit_4, 5, 20, 27, BLACK);
       tft.setCursor(66, v_line);
       tft.print(String(encoderPos));
       break;
     case 5:
-      tft.fillRect(86, 16, 20, 26, BLACK);
+      tft.fillRect(digit_5, 5, 20, 27, BLACK);
       tft.setCursor(86, v_line);
       tft.print(String(encoderPos));
       break;
@@ -297,89 +305,92 @@ void selectDigit(){
       down = true;
     }
   }
-  // debug:    Serial.println(pos);
-  switch (pos) { // move from digit to digit and change the colors of the previous digit and the target digit
+  Serial.println(pos); // Debug
+  // move from digit to digit left to right and then right to left and 
+  // change the colors of the previous digit and the target digit
+  switch (pos) {
     case 1:
-      // always coming from 2 change that back to BLUE
-      tft.setCursor(20, v_line);
+      // always coming from digit 2, change that back to BLUE
+      tft.setCursor(digit_2, v_line);
       tft.setTextColor(BLUE);
-      old_enc_pos_2 = encoderPos; // save the 2nd position
+      prev_val_digit_2 = encoderPos; // save the 2nd position
       tft.print(String(encoderPos)); // the rotary decoded number        
       // Highlight pos 1
-      tft.fillRect(0, 16, 20, 26, BLACK);
-      tft.setCursor(0, v_line);
+      // Fill starting from digit_col, row 5 until row 20, col 27
+      tft.fillRect(digit_1, 5, 20, 27, BLACK);
+      tft.setCursor(digit_1, v_line);
       tft.setTextColor(RED);
-      encoderPos = old_enc_pos_1; // show the saved 1st pos number
+      encoderPos = prev_val_digit_1; // show the saved 1st pos number
       tft.print(String(encoderPos));
       break;
     case 2:
-      if (down) { // coming from 3 change that back to BLUE
-        tft.setCursor(45, v_line);
+      if (down) { // coming from digit 3 change that back to BLUE
+        tft.setCursor(digit_3, v_line);
         tft.setTextColor(BLUE);
-        old_enc_pos_3 = encoderPos; // save the 3 pos number
+        prev_val_digit_3 = encoderPos; // save the digit 3 pos number
         tft.print(String(encoderPos));
       }else{ // coming from 1 change that back to BLUE
-        tft.setCursor(0, v_line);
+        tft.setCursor(digit_1, v_line);
         tft.setTextColor(BLUE);
-        old_enc_pos_1 = encoderPos; // save the 1st pos number
+        prev_val_digit_1 = encoderPos; // save the 1st pos number
         tft.print(String(encoderPos));
       }
       // Highlight 2
-      tft.fillRect(20, 16, 20, 26, BLACK);
-      tft.setCursor(20, v_line);
+      tft.fillRect(digit_2, 5, 20, 27, BLACK);
+      tft.setCursor(digit_2, v_line);
       tft.setTextColor(RED);
-      encoderPos = old_enc_pos_2; // show the saved 2nd number
+      encoderPos = prev_val_digit_2; // show the saved 2nd number
       tft.print(String(encoderPos));
       break;
     case 3:
       if (down) { // coming from 4 change that back to BLUE
-        tft.setCursor(66, v_line);
+        tft.setCursor(digit_4, v_line);
         tft.setTextColor(BLUE);
-        old_enc_pos_4 = encoderPos; // show the previous 4th number
+        prev_val_digit_4 = encoderPos; // show the previous 4th number
         tft.print(String(encoderPos));
       }else{ // coming from 2 change that to BLUE
-        tft.setCursor(20, v_line);
+        tft.setCursor(digit_2, v_line);
         tft.setTextColor(BLUE);
-        old_enc_pos_2 = encoderPos; // saved the 2nd pos number
+        prev_val_digit_2 = encoderPos; // saved the 2nd pos number
         tft.print(String(encoderPos));
       }
       // Highlight 3
-      tft.fillRect(45, 16, 20, 26, BLACK);
-      tft.setCursor(45, v_line);
+      tft.fillRect(digit_3, 5, 20, 27, BLACK);
+      tft.setCursor(digit_3, v_line);
       tft.setTextColor(RED);
-      encoderPos = old_enc_pos_3; // show the saved 3rd pos number
+      encoderPos = prev_val_digit_3; // show the saved 3rd pos number
       tft.print(String(encoderPos));
       break;
     case 4:
       if (down) { // coming from 5 change back to BLUE
-        tft.setCursor(86, v_line);
+        tft.setCursor(digit_5, v_line);
         tft.setTextColor(BLUE);
-        old_enc_pos_5 = encoderPos; // save the 5th pos number
+        prev_val_digit_5 = encoderPos; // save the 5th pos number
         tft.print(String(encoderPos));
       }else{ // coming from 3 change back to BLUE
-        tft.setCursor(45, v_line);
+        tft.setCursor(digit_3, v_line);
         tft.setTextColor(BLUE);
-        old_enc_pos_3 = encoderPos; // save the 3rd pos number
+        prev_val_digit_3 = encoderPos; // save the 3rd pos number
         tft.print(String(encoderPos));
       }
       // Highlight 4     
-      tft.fillRect(66, 16, 20, 26, BLACK);
-      tft.setCursor(66, v_line);
+      tft.fillRect(digit_4, 5, 20, 27, BLACK);
+      tft.setCursor(digit_4, v_line);
       tft.setTextColor(RED);
-      encoderPos = old_enc_pos_4; // show the saved 4th pos number
+      encoderPos = prev_val_digit_4; // show the saved 4th pos number
       tft.print(String(encoderPos));
       break;
     case 5:
       // always coming from 4 change that back to BLUE
-      tft.setCursor(66, v_line);
+      tft.setCursor(digit_4, v_line);
       tft.setTextColor(BLUE);
-      old_enc_pos_4 = encoderPos; // save the 4th pos number
+      prev_val_digit_4 = encoderPos; // save the 4th pos number
       tft.print(String(encoderPos));
       // Highlight 5
-      tft.fillRect(86, 16, 20, 26, BLACK);
-      tft.setCursor(86, v_line);
+      tft.fillRect(digit_5, 5, 20, 27, BLACK);
+      tft.setCursor(digit_5, v_line);
       tft.setTextColor(RED);
-      encoderPos = old_enc_pos_5; // show the saved 5th pos number
+      encoderPos = prev_val_digit_5; // show the saved 5th pos number
       tft.print(String(encoderPos));
       break;
     default:
@@ -408,10 +419,10 @@ void oledSetup() {
   tft.setFont(&FreeSans18pt7b);
   tft.setTextSize(1);
   
-  tft.setCursor(0, v_line);
-  tft.print(String(old_enc_pos_1));
-  tft.setCursor(20, v_line);
-  tft.print(String(old_enc_pos_2));
+  tft.setCursor(digit_1, v_line);
+  tft.print(String(prev_val_digit_1));
+  tft.setCursor(digit_2, v_line);
+  tft.print(String(prev_val_digit_2));
 
   // draw a decimal point using a square of 8x8 pixels
   for(int h = 40 ; h <= 43; h++) {
@@ -420,14 +431,14 @@ void oledSetup() {
     }
   }
 
-  tft.setCursor(45, v_line);  
-  tft.print(String(old_enc_pos_3));
-  tft.setCursor(66, v_line);
-  tft.setTextColor(RED);
-  tft.print(String(old_enc_pos_4));
-  tft.setTextColor(BLUE);
-  tft.setCursor(86, v_line); 
-  tft.print(String(old_enc_pos_5));
+  tft.setCursor(digit_3, v_line);  
+  tft.print(String(prev_val_digit_3));
+  tft.setTextColor(RED); // set 4 to red
+  tft.setCursor(digit_4, v_line); 
+  tft.print(String(prev_val_digit_4));
+  tft.setTextColor(BLUE); // go back to blue
+  tft.setCursor(digit_5, v_line); 
+  tft.print(String(prev_val_digit_5));
   tft.setFont();
   tft.setTextSize(2);
   tft.setCursor(108, v_line - 13);
@@ -468,6 +479,18 @@ void oledSetup() {
   tft.println("A");
 
   //-------------------------------------------
+  // draw the menu line
+  //
+  tft.setTextColor(WHITE);
+  tft.setFont(&FreeSans9pt7b);
+  tft.setTextSize(1);
+  tft.setCursor(0, menu_line); // from left side, down
+  tft.print("CC Mode");  
+  tft.setCursor(90, menu_line); 
+  tft.setTextColor(GREEN);
+  tft.print("OFF");
+
+    //-------------------------------------------
   // draw the status line
   //
   // left justified: Fan Off 
@@ -492,18 +515,6 @@ void oledSetup() {
   
   tft.setCursor(113, stat_line );
   tft.print("C");
-
-  //-------------------------------------------
-  // draw the menu line
-  //
-  tft.setTextColor(WHITE);
-  tft.setFont(&FreeSans9pt7b);
-  tft.setTextSize(1);
-  tft.setCursor(0, menu_line); // from left side, down
-  tft.print("CC Mode");  
-  tft.setCursor(90, menu_line); 
-  tft.setTextColor(GREEN);
-  tft.print("OFF");
   
   //-------------------------------------------
   // reset the font and colors for the V/A lines
