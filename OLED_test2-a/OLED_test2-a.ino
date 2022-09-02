@@ -1,12 +1,15 @@
 /*******
  * This is a test program for a rotary encoder with and a SSD1531 color OLED Display
  * 
- * The code is for a DC load interface.
+ * The code is for a AC/DC dynamic load user interface.
  * 
  * There are several bits and pieces from others used in this sketch
  * Author Paul Versteeg
  * 
- * SS1531 library from Adafruit
+ * SS1531 library from Adafruit 
+ * https://github.com/adafruit/Adafruit-GFX-Library
+ *
+ *
  * Interrupt-based Rotary Encoder Sketch
  * by Simon Merrett, based on insight from Oleg Mazurov, Nick Gammon, rt, Steve Spence
  * MyOneButton from JEFF'S ARDUINO BLOG
@@ -14,6 +17,7 @@
 
 #include <Adafruit_GFX.h>
 #include <Fonts/FreeSans18pt7b.h> // used for V and A digits
+#include <Fonts/FreeSans9pt7b.h> // used for the mode line
 #include <Adafruit_SSD1351.h>
 #include <SPI.h>
 #include "MyOneButton.h" // file must be in same folder as the main .ino file
@@ -27,12 +31,6 @@ volatile byte encoderPos = 0; //current value of encoder position (0-255). Chang
 volatile byte oldEncPos = 0; //stores the last encoder position to see if it has changed
 volatile byte reading = 0; //store the direct values we read from our interrupt pins before checking to see if we have moved a whole detent
 
-int pos = 4; // 5 digits, pos 1 is LSB 54.321
-int old_enc_pos_1 = 0; // placeholders for the original digit values
-int old_enc_pos_2 = 0;
-int old_enc_pos_3 = 0;
-int old_enc_pos_4 = 0;
-int old_enc_pos_5 = 0;
 
 boolean down = false; // direction of decade counter
 
@@ -61,23 +59,7 @@ unsigned long firstTime; // how long since the button was first pressed
 
 enum menu menuState;
 
-/*************************************************** 
-  This is a example sketch demonstrating graphic drawing
-  capabilities of the SSD1351 library for the 1.5" 
-  and 1.27" 16-bit Color OLEDs with SSD1351 driver chip
- 
-  If you're using a 1.27" OLED, change SSD1351HEIGHT in Adafruit_SSD1351.h
-   to 96 instead of 128
-  These displays use SPI to communicate, 4 or 5 pins are required to  
-  interface.
-  
-  Written by Limor Fried/Ladyada for Adafruit Industries.  
-  BSD license, all text above must be included in any redistribution
-  The Adafruit GFX Graphics core library is also required
-  https://github.com/adafruit/Adafruit-GFX-Library
-  Be sure to install it!
- ****************************************************/
-
+// SSD1531 SPI declarations
 // You can use any (4 or) 5 pins to drive the display 
 #define sclk 2
 #define mosi 3
@@ -95,9 +77,29 @@ enum menu menuState;
 #define YELLOW          0xFFE0  
 #define WHITE           0xFFFF
 
+// Use the hardware SPI pins to communicate with the OLED display
+// (for an UNO that is sclk = 13 and sid = 11) and pin 10 must be 
+// an output.
+Adafruit_SSD1351 tft = Adafruit_SSD1351(cs, dc, rst);
+
+// OLED display vertical line positions
+int v_line = 30;    // Volt/Watt/Ohm line
+int a_line = 65;    // Amp line
+int menu_line = 100; // Menu line
+int stat_line = 118; // Status line
+
+// used to address the individual digits in the V/I//RW lines
+int pos = 4; // 5 digits, pos 1 is LSB of 88.888
+// placeholders for the original values for each digit
+int old_enc_pos_1 = 0; 
+int old_enc_pos_2 = 0;
+int old_enc_pos_3 = 0;
+int old_enc_pos_4 = 0;
+int old_enc_pos_5 = 0;
+
 
 /*
- * Forward Declarations
+ * Some Forward Function Declarations
  */
 void fillpixelbypixel();
 void enc_a_isr();
@@ -149,17 +151,6 @@ void OnVLongPress(int) {
   // not used yet
 }
 
-
-// Use the hardware SPI pins to communicate with the OLED display
-// (for an UNO that is sclk = 13 and sid = 11) and pin 10 must be 
-// an output.
-Adafruit_SSD1351 tft = Adafruit_SSD1351(cs, dc, rst);
-
-// OLED display vertical line positions
-int v_line = 40;    // Volt line
-int a_line = 72;    // Amp line
-int stat_line = 80; // Status line
-int menu_line = 90; // Menu line
   
 
 
@@ -506,11 +497,12 @@ void oledSetup() {
   // draw the menu line
   //
   tft.setTextColor(WHITE);
-  tft.setFont(); 
+  tft.setFont(&FreeSans9pt7b);
   tft.setTextSize(1);
   tft.setCursor(0, menu_line); // from left side, down
   tft.print("CC Mode");  
-  tft.setCursor(65, menu_line); 
+  tft.setCursor(90, menu_line); 
+  tft.setTextColor(GREEN);
   tft.print("OFF");
   
   //-------------------------------------------
@@ -520,8 +512,7 @@ void oledSetup() {
   tft.setTextSize(1);
 
   //-------------------------------------------
-  // set the border indicators
-  
+  // set the outsice corner indicators by using one pixel  
   tft.drawPixel(0, 0, WHITE);
   tft.drawPixel(0, 127, WHITE);
   tft.drawPixel(127, 0, WHITE);
