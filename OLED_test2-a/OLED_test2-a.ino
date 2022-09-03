@@ -1,12 +1,16 @@
 /*******
  * This is a test program for a rotary encoder with and a SSD1531 color OLED Display
+ * it uses an early attempt to switch from displaying actual values that can be modified
+ * on the fly, to also switch to an Edit mode by which you can set all digits before
+ * starting a measurment. A lot needs to be further developed with running hardware.
  * 
  * The code is for a AC/DC dynamic load user interface.
  * 
  * There are several bits and pieces from others used in this sketch
  * Author Paul Versteeg
  * 
- * SS1531 library from Adafruit 
+ * SS1531 library and fonts from Adafruit 
+ * https://github.com/adafruit/Adafruit-SSD1351-library
  * https://github.com/adafruit/Adafruit-GFX-Library
  *
  *
@@ -15,25 +19,26 @@
  * MyOneButton from JEFF'S ARDUINO BLOG
 */
 
+#include <Adafruit_SSD1351.h>
 #include <Adafruit_GFX.h>
 #include <Fonts/FreeSans18pt7b.h> // used for V and A digits
-#include <Fonts/FreeSans9pt7b.h> // used for the mode line
-#include <Adafruit_SSD1351.h>
+#include <Fonts/FreeSans9pt7b.h> // used for the mode and status lines
 #include <SPI.h>
 #include "MyOneButton.h" // file must be in same folder as the main .ino file
 
+// Rotary encoder 
 static int enc_A = 2; // No filter caps used!
 static int enc_B = 3; // No filter caps used!
-//static int enc_But = 7; // No filter caps used!
+static int enc_But = 7; // Rotary Encoder Button. No filter caps used!
+//#define enc_But 7 // Rotary Encoder Button connected to input pin D7
 volatile byte aFlag = 0; // expecting a rising edge on pinA encoder has arrived at a detent
 volatile byte bFlag = 0; // expecting a rising edge on pinB encoder has arrived at a detent (opposite direction to when aFlag is set)
 volatile byte encoderPos = 0; //current value of encoder position (0-255). Change to int or uin16_t for larger values
 volatile byte oldEncPos = 0; //stores the last encoder position to see if it has changed
 volatile byte reading = 0; //store the direct values we read from our interrupt pins before checking to see if we have moved a whole detent
-
-
 boolean down = false; // direction of decade counter
 
+// Encoder button
 int butt_pos;        // Current state of the encoder button
                      // (LOW is pressed b/c i'm using the pullup resistors)
 long millis_held;    // How long the button was held (milliseconds)
@@ -41,10 +46,15 @@ long secs_held;      // How long the button was held (seconds)
 long prev_secs_held; // How long the button was held in the previous check
 byte prev_butt_pos = HIGH;
 unsigned long firstTime; // how long since the button was first pressed 
+MyOneButton bp; // instantiate the button press class
 
+// Menu modes
+boolean Input_Mode = true; // starting mode for the Mode display line
+boolean Display_Mode = false;
 /*
- * Menu and Mode Declarations
+ * Menu and Mode Declarations - not used yet
  */
+ /*
  enum menu{
   OpsMode,  // normal Operating Mode
   MenuMode, // menu mode, selects V or A settings, future rotary encode activity
@@ -57,18 +67,23 @@ unsigned long firstTime; // how long since the button was first pressed
             //   enter via VAMode, exit via double-click
   // needs to be expanded/changed to cover the CC, VC, CW, CR and Batt modes
  };
-
 enum menu menuState;
+*/
 
 // SSD1531 SPI declarations
 // You can use any (4 or) 5 pins to drive the display 
-#define sclk 2
-#define mosi 3
-#define dc   4
-#define cs   5
-#define rst  6
+// Screen dimensions
+#define SCREEN_WIDTH  128
+#define SCREEN_HEIGHT 128 // Change this to 96 for 1.27" OLED.
 
-// Color definitions
+// You can use any (4 or) 5 pins 
+#define SCLK_PIN 2
+#define MOSI_PIN 3
+#define DC_PIN   4
+#define CS_PIN   5
+#define RST_PIN  6
+
+// OLED Color definitions
 #define BLACK           0x0000
 #define BLUE            0x001F
 #define RED             0xF800
@@ -78,25 +93,25 @@ enum menu menuState;
 #define YELLOW          0xFFE0  
 #define WHITE           0xFFFF
 
-// Use the hardware SPI pins to communicate with the OLED display
+// Hardware SPI pins to communicate with the OLED display
 // (for an UNO that is sclk = 13 and sid = 11) and pin 10 must be 
 // an output.
-Adafruit_SSD1351 tft = Adafruit_SSD1351(cs, dc, rst);
+Adafruit_SSD1351 tft = Adafruit_SSD1351(SCREEN_WIDTH, SCREEN_HEIGHT, &SPI, CS_PIN, DC_PIN, RST_PIN);
 
 // OLED display vertical line positions
-int v_line = 30;    // Volt/Watt/Ohm line
-int a_line = 65;    // Amp line
+int v_line = 30;    // Volt line
+int a_line = 65;    // Adjustment & Current line
 int menu_line = 100; // Menu line
 int stat_line = 118; // Status line
-// Col starting positions for the 5 digits
+// Col digit positions for the 5 digits
 int digit_1 = 0;
 int digit_2 = 20;
 int digit_3 = 45;
 int digit_4 = 66;
 int digit_5 = 86;
 
-// used to address the individual digits in the V/I/R/W lines
-int pos = 4; // 5 digits, pos 1 is MSB of 88.888
+// This is used to address the individual digits in the V/I/R/W lines
+int pos = 4; // 5 digits, pos 1 is MSB of 88.888; always start on digit 4
 // placeholders for the original values for each digit
 int prev_val_digit_1 = 0; 
 int prev_val_digit_2 = 0;
@@ -104,9 +119,12 @@ int prev_val_digit_3 = 0;
 int prev_val_digit_4 = 0;
 int prev_val_digit_5 = 0;
 
+// dummy test values
+float amp_test = 12.345;
+float volt_test = 30.123;
 
-/*
- * Some Forward Function Declarations
+/* 
+ *  Some Forward Function Declarations
  */
 void fillpixelbypixel();
 void enc_a_isr();
@@ -115,10 +133,7 @@ void digitClear();
 void selectDigit();
 void oledSetup();
 
- 
-#define enc_But 7 // Rotary Encoder Button connected to input pin D7
 
-MyOneButton bp; // instantiate the button press class
 
 // Declarations for the encoder button states
 /*
@@ -133,12 +148,41 @@ void OnClick(int) { // with more buttons, use (int pin) as a var to differentiat
 
 /*
  * OnDblClick is a double click response.
- * Used to enter the Menu Mode if in the Operations Mode.
- * Used to exit the V/A Setting Mode and goes back to the Menu Mode.
+ * Used to toggle from the display mode of the actual values, to the input mode for the CC, CV, CW, Batt modes.
+ *
+ * todo, pick-up the entered values and use that to setup the DAC
+ * 
  */
 void OnDblClick(int) {
   Serial.println("Double Click");
-  // not used yet
+  // toggle from the Display mode to the Input mode
+  if (Input_Mode == true){
+    Serial.println("Display Mode");
+    tft.setTextColor(BLUE);    
+    convertFloat(); // take the measured float value, convert and enter them into the individual digits
+    // prepare the display for the actually measured values
+    clearLine();
+    tft.setCursor(0, a_line); // set cursor to first position
+    tft.print(amp_test, 3);   // test the measured value with 3 decimals
+    // add the suffix
+    tft.setFont();
+    tft.setTextSize(2);
+    tft.setCursor(108, a_line - 13);
+    tft.println("A"); // assume CC mode
+    // set back to use large fonts
+    tft.setFont(&FreeSans18pt7b);
+    tft.setTextSize(1);
+    pos = 4; // always start editing with digit 4
+    encoderPos = prev_val_digit_4;
+    Display_Mode = true;
+    Input_Mode = false;
+  }else{
+    Serial.println("Input Mode");
+    tft.setTextColor(GREEN);
+    pos = 4; // always start editing with digit 4
+    Input_Mode = true;
+    Display_Mode = false;
+  }
 }
 
 /*
@@ -197,39 +241,71 @@ void loop(){
 }
 
 /*
- * Move from digit to digit in the V/A line.
+ * Convert a float to individual digits
+ * 
+ */
+void convertFloat(){
+  // Shift the decimal point right three digits and round off to an integer.
+  int value = (amp_test * 1000.0) + 0.5; 
+  // Extract each digit with the 'modulo' operator (%)
+  char tenthousandDigit = '0' + ((value / 10000) % 10);
+  prev_val_digit_1 = tenthousandDigit - '0'; // convert char to int
+  char thousandDigit = '0' + ((value / 1000) % 10);
+  prev_val_digit_2 = thousandDigit - '0';
+  char hundredDigit =  '0' + ((value / 100) % 10);
+  prev_val_digit_3 = hundredDigit - '0';
+  char tensDigit =  '0' + ((value / 10) % 10);
+  prev_val_digit_4 = tensDigit - '0';
+  char onesDigit = '0' + (value % 10);
+  prev_val_digit_5 = onesDigit - '0';  
+}
+ 
+/*
+ * Clear the input line to get ready for the display of actual values
+ * 
+ */
+void clearLine(){
+  tft.fillRect(0, 40, SCREEN_WIDTH, 27, BLACK); // reset the Current/Menu line
+}
+
+/*
+ * Move from digit to digit in the A/input line.
  * Moves are going up and down from digits 1-2-3-4-5-4-3-2-1 through the line
  * The selected digit field is made black, which is the background, to make place
  * for a new value selected by the rotary switch.
  * 
- * Later: change encoder ISR's to have limits here (encoderPos % max)
+ * todo: change encoder ISR's to have limits here (encoderPos % max)?
+ * todo: pick-up the measured value, convert to digits and use them to start the editing from
+ *        this allows us to change the setup value on the fly.
+ * 
  */
 void digitClear(){
+  tft.setTextColor(RED); // we start with digit 4, set it red to start with
   switch (pos) { // encoder rotating changes the value of the selected digit/position
     case 1:
-      tft.fillRect(digit_1, 5, 20, 27, BLACK); // define a black rectangular the size of a digit
+      tft.fillRect(digit_1, 40, 20, 27, BLACK); // define a black rectangular the size of a digit
       // Fill starting from col 0, row 5 until row 20, col 27
-      tft.setCursor(0, v_line);           // go to the right position of the digit
+      tft.setCursor(0, a_line);           // go to the right position of the digit
       tft.print(String(encoderPos));      // black it out
       break;
     case 2:
-      tft.fillRect(digit_2, 5, 20, 27, BLACK);
-      tft.setCursor(20, v_line);
+      tft.fillRect(digit_2, 40, 20, 27, BLACK);
+      tft.setCursor(20, a_line);
       tft.print(String(encoderPos));
       break;
     case 3:
-      tft.fillRect(digit_3, 5, 20, 27, BLACK);
-      tft.setCursor(45, v_line);
+      tft.fillRect(digit_3, 40, 20, 27, BLACK);
+      tft.setCursor(45, a_line);
       tft.print(String(encoderPos));
       break;
     case 4:
-      tft.fillRect(digit_4, 5, 20, 27, BLACK);
-      tft.setCursor(66, v_line);
+      tft.fillRect(digit_4, 40, 20, 27, BLACK);
+      tft.setCursor(66, a_line);
       tft.print(String(encoderPos));
       break;
     case 5:
-      tft.fillRect(digit_5, 5, 20, 27, BLACK);
-      tft.setCursor(86, v_line);
+      tft.fillRect(digit_5, 40, 20, 27, BLACK);
+      tft.setCursor(86, a_line);
       tft.print(String(encoderPos));
       break;
     default:
@@ -310,85 +386,85 @@ void selectDigit(){
   // change the colors of the previous digit and the target digit
   switch (pos) {
     case 1:
-      // always coming from digit 2, change that back to BLUE
-      tft.setCursor(digit_2, v_line);
-      tft.setTextColor(BLUE);
+      // must always coming from digit 2, change that back to GREEN
+      tft.setCursor(digit_2, a_line);
+      tft.setTextColor(GREEN);
       prev_val_digit_2 = encoderPos; // save the 2nd position
       tft.print(String(encoderPos)); // the rotary decoded number        
       // Highlight pos 1
       // Fill starting from digit_col, row 5 until row 20, col 27
-      tft.fillRect(digit_1, 5, 20, 27, BLACK);
-      tft.setCursor(digit_1, v_line);
+      tft.fillRect(digit_1, 40, 20, 27, BLACK);
+      tft.setCursor(digit_1, a_line);
       tft.setTextColor(RED);
       encoderPos = prev_val_digit_1; // show the saved 1st pos number
       tft.print(String(encoderPos));
       break;
     case 2:
-      if (down) { // coming from digit 3 change that back to BLUE
-        tft.setCursor(digit_3, v_line);
-        tft.setTextColor(BLUE);
+      if (down) { // coming from digit 3 change that back to GREEN
+        tft.setCursor(digit_3, a_line);
+        tft.setTextColor(GREEN);
         prev_val_digit_3 = encoderPos; // save the digit 3 pos number
         tft.print(String(encoderPos));
       }else{ // coming from 1 change that back to BLUE
-        tft.setCursor(digit_1, v_line);
-        tft.setTextColor(BLUE);
+        tft.setCursor(digit_1, a_line);
+        tft.setTextColor(GREEN);
         prev_val_digit_1 = encoderPos; // save the 1st pos number
         tft.print(String(encoderPos));
       }
       // Highlight 2
-      tft.fillRect(digit_2, 5, 20, 27, BLACK);
-      tft.setCursor(digit_2, v_line);
+      tft.fillRect(digit_2, 40, 20, 27, BLACK);
+      tft.setCursor(digit_2, a_line);
       tft.setTextColor(RED);
       encoderPos = prev_val_digit_2; // show the saved 2nd number
       tft.print(String(encoderPos));
       break;
     case 3:
-      if (down) { // coming from 4 change that back to BLUE
-        tft.setCursor(digit_4, v_line);
-        tft.setTextColor(BLUE);
+      if (down) { // coming from 4 change that back to GREEN
+        tft.setCursor(digit_4, a_line);
+        tft.setTextColor(GREEN);
         prev_val_digit_4 = encoderPos; // show the previous 4th number
         tft.print(String(encoderPos));
       }else{ // coming from 2 change that to BLUE
-        tft.setCursor(digit_2, v_line);
-        tft.setTextColor(BLUE);
+        tft.setCursor(digit_2, a_line);
+        tft.setTextColor(GREEN);
         prev_val_digit_2 = encoderPos; // saved the 2nd pos number
         tft.print(String(encoderPos));
       }
       // Highlight 3
-      tft.fillRect(digit_3, 5, 20, 27, BLACK);
-      tft.setCursor(digit_3, v_line);
+      tft.fillRect(digit_3, 40, 20, 27, BLACK);
+      tft.setCursor(digit_3, a_line);
       tft.setTextColor(RED);
       encoderPos = prev_val_digit_3; // show the saved 3rd pos number
       tft.print(String(encoderPos));
       break;
-    case 4:
-      if (down) { // coming from 5 change back to BLUE
-        tft.setCursor(digit_5, v_line);
-        tft.setTextColor(BLUE);
+    case 4: // this is the default starting point for an editing session
+      if (down) { // if coming from 5 change back to GREEN
+        tft.setCursor(digit_5, a_line);
+        tft.setTextColor(GREEN);
         prev_val_digit_5 = encoderPos; // save the 5th pos number
         tft.print(String(encoderPos));
       }else{ // coming from 3 change back to BLUE
-        tft.setCursor(digit_3, v_line);
-        tft.setTextColor(BLUE);
+        tft.setCursor(digit_3, a_line);
+        tft.setTextColor(GREEN);
         prev_val_digit_3 = encoderPos; // save the 3rd pos number
         tft.print(String(encoderPos));
       }
       // Highlight 4     
-      tft.fillRect(digit_4, 5, 20, 27, BLACK);
-      tft.setCursor(digit_4, v_line);
+      tft.fillRect(digit_4, 40, 20, 27, BLACK);
+      tft.setCursor(digit_4, a_line);
       tft.setTextColor(RED);
       encoderPos = prev_val_digit_4; // show the saved 4th pos number
       tft.print(String(encoderPos));
       break;
     case 5:
-      // always coming from 4 change that back to BLUE
-      tft.setCursor(digit_4, v_line);
-      tft.setTextColor(BLUE);
+      // always coming from 4 change that back to GREEN
+      tft.setCursor(digit_4, a_line);
+      tft.setTextColor(GREEN);
       prev_val_digit_4 = encoderPos; // save the 4th pos number
       tft.print(String(encoderPos));
       // Highlight 5
-      tft.fillRect(digit_5, 5, 20, 27, BLACK);
-      tft.setCursor(digit_5, v_line);
+      tft.fillRect(digit_5, 40, 20, 27, BLACK);
+      tft.setCursor(digit_5, a_line);
       tft.setTextColor(RED);
       encoderPos = prev_val_digit_5; // show the saved 5th pos number
       tft.print(String(encoderPos));
@@ -413,50 +489,33 @@ void oledSetup() {
   //-------------------------------------------
   // Draw the Volt line
   //
-  // The line will be 00.000V in blue with the 4th digit in red
+  // The line will be 00.000V in blue
     
   tft.setTextColor(BLUE);
   tft.setFont(&FreeSans18pt7b);
   tft.setTextSize(1);
   
   tft.setCursor(digit_1, v_line);
-  tft.print(String(prev_val_digit_1));
-  tft.setCursor(digit_2, v_line);
-  tft.print(String(prev_val_digit_2));
-
-  // draw a decimal point using a square of 8x8 pixels
-  for(int h = 40 ; h <= 43; h++) {
-    for(int v = v_line -3 ; v <= v_line; v++) {
-      tft.drawPixel(h, v, BLUE);
-    }
-  }
-
-  tft.setCursor(digit_3, v_line);  
-  tft.print(String(prev_val_digit_3));
-  tft.setTextColor(RED); // set 4 to red
-  tft.setCursor(digit_4, v_line); 
-  tft.print(String(prev_val_digit_4));
-  tft.setTextColor(BLUE); // go back to blue
-  tft.setCursor(digit_5, v_line); 
-  tft.print(String(prev_val_digit_5));
+  tft.print(volt_test, 3);   // print the test value with 3 decimals
+  // add the suffix
   tft.setFont();
   tft.setTextSize(2);
   tft.setCursor(108, v_line - 13);
   tft.println("V");
 
   //-------------------------------------------
-  // draw the Amp line
+  // draw the Amp and Input line
   //
-  // The line will be 88.888A in green with the 4th digit in red
+  // The line will be 00.000A in green with the 4th digit in red
   
   tft.setTextColor(GREEN);
   tft.setFont(&FreeSans18pt7b);
   tft.setTextSize(1);
 
   tft.setCursor(0, a_line);
-  tft.print("8");
+  tft.print("0");
   tft.setCursor(20, a_line);
-  tft.print("8");
+  tft.print("0");
   
   // draw a decimal point using a square of 8x8 pixels
   for(int h = 40 ; h <= 43; h++) {
@@ -465,13 +524,13 @@ void oledSetup() {
     }
   }
   tft.setCursor(45, a_line);  
-  tft.print("8");
+  tft.print("0");
   tft.setCursor(66, a_line); 
   tft.setTextColor(RED);
-  tft.print("8");
+  tft.print("0");
   tft.setTextColor(GREEN);
   tft.setCursor(86, a_line); 
-  tft.print("8");
+  tft.print("0");
  
   tft.setFont();
   tft.setTextSize(2);
@@ -517,8 +576,8 @@ void oledSetup() {
   tft.print("C");
   
   //-------------------------------------------
-  // reset the font and colors for the V/A lines
-  tft.setTextColor(BLUE);
+  // reset the font and colors for the Amp line
+  tft.setTextColor(GREEN);
   tft.setFont(&FreeSans18pt7b);
   tft.setTextSize(1);
 
