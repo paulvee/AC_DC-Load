@@ -1,0 +1,2 @@
+The DSO screenshots show the various inputs to the ADC and the correct calculation of the RMS value. 
+The measured values by the DSO (Per.Vrms) correspond with the script outputs and also with a 6.5 digit True RMS DMM.
