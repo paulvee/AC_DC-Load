@@ -7,7 +7,4 @@ There will be no version control, what you see is the latest, look at the dates 
 
 Nano-rms-test is the latest functioning prototype for the complete dynamic AC/DC load system, as far as I got. This will be updated regularly.
 
-OLED_test2-a is a very(!) experimental and not fully working yet. It's an experiment to use
-a rotary encoder to select and set individual digits on an OLED display.
-
 Measure_example_rms is a fully functional, interrupt driven rms calculator using the Nano ADC0 input
