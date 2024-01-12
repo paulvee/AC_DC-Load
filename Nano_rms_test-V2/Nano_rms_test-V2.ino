@@ -29,9 +29,9 @@ volatile byte oldEncPos = 0; //stores the last encoder position to see if it has
 volatile byte reading = 0; //store the direct values we read from our interrupt pins before checking to see if we have moved a whole detent
 
 // Setup the poor man's DAC by using a PWM based version
-int pwmPin = 9;      // D9 PWM connected to digital pin 9
-double const DACcalibAC = 1.1; // adjust the DAC for AC current output levels
-double const DACcalibDC = 0.7; // adjust the DAC for DC current output levels
+int pwmPin = 9;      // D9 PWM output connected to digital pin 9
+double const DACcalibAC = 1.0; // adjust the DAC for AC current output levels
+double const DACcalibDC = 1.0; // adjust the DAC for DC current output levels
 
 // ADC read low pass filter setup
 /* not used
@@ -95,15 +95,13 @@ double dutV; // holds the DUT volt value
 double dutVcalib = 10.0; // calibration for the /10 divider
 double prev_dutV = 0.0; //keep track of value changes for display
 double shuntV; // holds the shunt volt value
-double const shuntVcalib = 0.9; // calibration for the 10x gain, match the DUT current display value
+double const shuntVcalib = 10.0; // calibration for the 10x gain, match the DUT current display value
 double prev_shuntV = 0.0; // keep track of value changes for display
 volatile int request_adc = 0;
-double const ac_bridgeLoss = 0.1; // Fudge factor compensation
-double const dc_bridgeLoss = 1.3; // avg bridge diode junction drop in volt goes up to 1.48V @500mA
-double const ac_halfwavefactor = 1.5; // The rms ac voltage after the bridge needs to be compensated
-double const ac_dutV_factor = 13; // multiplier to create a dynamic compensation factor
-double const vRef = 4.990; // the actually measured VREF voltage on the Nano board.
-double const adc_conversion_factor = vRef / 1023; // for DC measurements, VREF voltage as measured
+double const dc_cal_factor1 = 1.03; // calibration factor < 25V
+double const dc_cal_factor2 = 1.04; // calibration factor > 25V
+double const vRef = 4.99155; // the actually measured VREF voltage on the Nano board.
+double const adc_conversion_factor = vRef / 1023.0; // for DC measurements, VREF voltage as measured
 
 volatile int period_counter = 1; // keep track of sampling
 volatile int Measurement_completed = 0; // signal that aquisition is complete
@@ -124,7 +122,7 @@ void enc_b_isr();
 
 void setup() 
 {
-  Serial.begin(115200); // for debugging
+  Serial.begin(9600); // for debugging
   
   pinMode(PIN_DEBUG, OUTPUT); // optional: so we can show activity on a scope
   pinMode(DUT_Mode, INPUT_PULLUP); // Mode switch, default is AC
@@ -168,14 +166,16 @@ void setup()
 
 
 /*
+ * Interrupt service routine to calculate the RMS value
  * Timer0 interrupt routine will be called every ms
- * 50Hz has 20mS, so can sample the voltage 20 times in a period to get a good coverage.
+ * 50Hz has 20mS, so we can sample the voltage 20 times in a period to get a good coverage.
  * The actual number of samples is set by RMS_WINDOW
  * In this ISR we're reading the ADC value at every interrupt and passing it on 
  * to the rms library.
  * 
  * At this moment, the global measurement_cycle is not reset in the DC mode,
  * so the RMS measurements are only running in the AC mode.
+ * In order to follow what is going on, we also toggle a port so a DSO can monitor
  * The DSO will only show the sampling while we're within the window so we can
  * see exactly when we sample the waveform and how many times.
  */
@@ -212,9 +212,9 @@ void loop() {
     // setup the PWM with the current value
     // unfortunately, the required settings in the AC mode is slightly different from the DC mode
     if (measure_mode == HIGH){
-      analogWrite(pwmPin, encoderPos * DACcalibAC); // 0..255
+      analogWrite(pwmPin, encoderPos * DACcalibAC); // AC mode 0..255
     }else{
-      analogWrite(pwmPin, encoderPos * DACcalibDC); // 0..255
+      analogWrite(pwmPin, encoderPos * DACcalibDC); // DC mode 0..255
     }
     oldEncPos = encoderPos;
   } 
@@ -227,32 +227,22 @@ void loop() {
       ac_mode_setup = true;
       dc_mode_setup = false;
     }
-    
+    // AC measurements
     if (Measurement_completed == 1){
-      // calculate the rms values
-      // DUT voltage
-      /*
-       * This section for the software RMS calculation
-      read_dut_Rms.publish();
-      float dutVraw = read_dut_Rms.rmsVal * dutVcalib; // /10 input divider factor
-      Serial.println(1+dutVraw/10);
-      // dutV = adcFilterV.filter(dutVraw); // low-pass filter no longer used
-      // use the bridge and conversion factors to get to the real DUT voltage
-      dutV = (dutVraw + ac_bridgeLoss) * (ac_halfwavefactor * (1+ dutVraw/ac_dutV_factor)); 
-      */
-      // This section for the True RMS calculation
-      // The output from the True RMS convertor is 0..1V DC
-      double dutVraw = analogRead(DUT_INPUT) * adc_conversion_factor;  // adc bits to Volt conversion
-      // Serial.println(dutVraw,4); // note that we're using the divide by 60 attenuation
-      // We need to factor in the double rectified factor 1.15, the attenuation factor 60,  
-      // the full wave conversion factor 2 and add the the bridge loss of 1.3 to get to the real DUT voltage
-      dutV = (dutVraw * 1.15 * 60 * 2) + 1.3; 
+      // get the DUT voltage
+      // The True RMS calculation for the DUT voltage is done by the LTC1966
+      // The output from the LTC1966 is 0..1V DC
+      double dutVraw = analogRead(DUT_INPUT); // read the LTC output
+      dutVraw = dutVraw * adc_conversion_factor;  // adc bits to Volt conversion
+      dutVraw = dutVraw * 10;  // attenuator
+      dutV = dutVraw; // casting
       
-      // current shunt
+      // get the shunt voltage = DUT current value
+      // we calculate the applied DUT current by software
       read_shunt_Rms.publish();
       float shuntVraw = read_shunt_Rms.rmsVal;
       //shuntV = adcFilterA.filter(shuntVraw); // low-pass filter no longer used
-      shuntV = shuntVraw * shuntVcalib; // use the 10x Opamp gain correction value
+      shuntV = shuntVraw * shuntVcalib; //  * shuntVcalib; // use the 10x input attenuator
       
       send_ac_to_monitor(); // for debugging 
        
@@ -267,7 +257,7 @@ void loop() {
       tft.print("mA"); 
      
       Measurement_completed = 0; // restart the measurement cycle
-      }
+      } // end of AC measurement
   }else{ // We're measuring DC
     // note that in the DC mode, we do not set the global measurement_completed var so the Timer is not triggering the sampling 
     // we pick-up the ADC readings here during the normal loop execution, which is OK for DC signals.
@@ -283,8 +273,13 @@ void loop() {
     // DUT voltage
     double dutVraw = analogRead(DUT_INPUT) * adc_conversion_factor;  // adc bits to Volt conversion
     // dutV = dcFilterV.filter(dutVraw); low-pass filter, no longer used
-    dutVraw = (dutVraw * dutVcalib) + dc_bridgeLoss; // use the /10 input divider calibration and add the bridge diode junction losses
-    Serial.println(dutVraw);    
+    dutVraw = (dutVraw * dutVcalib); // use the /10 input divider calibration
+    if (dutVraw < 25){
+      dutV = dutVraw * dc_cal_factor1; 
+    }else{
+      dutV = dutVraw * dc_cal_factor2;
+    }  
+    
     // Shunt voltage = current
     double shuntVraw = analogRead(SHUNT_INPUT) * adc_conversion_factor; // adc to Volt conversion
     // shuntV = dcFilterA.filter(shuntVraw); // low-pass filter, no longer used
@@ -347,7 +342,15 @@ void loop() {
     }
     tft.print(String(shuntV));  // send to OLED display
   }
-  
+  // print the rotary switch position
+ // if(oldEncPos != encoderPos) {
+    tft.fillRect(0, stat_line+4, 128, 20, BLACK); // line clear with a black rectangular
+    tft.setTextColor(WHITE);
+    tft.setFont(&FreeSans9pt7b);
+    tft.setTextSize(1);
+    tft.setCursor(0, stat_line+18); // from left side, down
+    tft.print(encoderPos);
+ // }
   delay(500); // only for testing, remove for final version
 }
 
@@ -408,7 +411,14 @@ void setup_oled_ac(){
   tft.setTextSize(1);
   tft.setCursor(0, stat_line); // from left side, down
   tft.print("AC");  
-  
+
+  // print the rotary switch position
+  tft.fillRect(0, stat_line+4, 128, 20, BLACK); // line clear with a black rectangular
+  tft.setTextColor(WHITE);
+  tft.setFont(&FreeSans9pt7b);
+  tft.setTextSize(1);
+  tft.setCursor(0, stat_line+18); // from left side, down
+  tft.print(encoderPos);   
 }
 
 
@@ -436,7 +446,14 @@ void setup_oled_dc(){
   tft.setTextSize(1);
   tft.setCursor(0, stat_line); // from left side, down
   tft.print("DC");  
-   
+
+  // print the rotary switch position
+  tft.fillRect(0, stat_line+4, 128, 20, BLACK); // line clear with a black rectangular
+  tft.setTextColor(WHITE);
+  tft.setFont(&FreeSans9pt7b);
+  tft.setTextSize(1);
+  tft.setCursor(0, stat_line+18); // from left side, down
+  tft.print(encoderPos);    
 }
 
 
