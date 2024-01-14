@@ -264,8 +264,8 @@ void loop() {
     // DUT voltage
     double dutVraw = analogRead(DUT_INPUT) * adc_conversion_factor;  // adc bits to Volt conversion
     // dutV = dcFilterV.filter(dutVraw); low-pass filter, no longer used
-    dutVraw = (dutVraw * dutVcalib * dutVdiv); // compensate for the /35 input divider and calibration
-    dutV = dutVraw * dc_cal_factor; // calibration
+    dutVraw = (dutVraw * dutVcalib * dutVdiv); // compensate for the /35 input divider and convert to volts
+    dutV = dutVraw * dc_cal_factor; // add a calibration factor
     
     // Shunt voltage = current
     double shuntVraw = analogRead(SHUNT_INPUT) * adc_conversion_factor; // adc to Volt conversion
@@ -277,7 +277,9 @@ void loop() {
     tft.setFont(&FreeSans9pt7b);
     tft.setTextSize(1);
     tft.setCursor(digit_3+8, stat_line); // from left side, down
-    tft.print(encoderPos * 10 * round(dutV/10)); // 10mA per click multiplied by DUT voltage/10
+    // Here we add in the DUT voltage effect on the DUT current
+    // Rounding the DUT voltage has the side effect that the step resolution changes with the voltage
+    tft.print(encoderPos * 10 * round(dutV/10)); // nominal 10mA per click multiplied by DUT voltage/10
     tft.setCursor(digit_5+10, stat_line); // from left side, down
     tft.print("mA"); 
       
