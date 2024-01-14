@@ -12,11 +12,10 @@
 #include <Fonts/FreeSans9pt7b.h> // display fonts used for the mode line
 #include <SPI.h>  // communication method for the display
 #include <TrueRMS.h>  // True RMS library: https://github.com/MartinStokroos/TrueRMS
-#include <Ewma.h> // low pass filter library https://github.com/jonnieZG/EWMA
 
-#define PIN_DEBUG 8 // D8 optional: to trace activity on a scope
-#define DUT_INPUT 0     // define the used ADC input channels
-#define SHUNT_INPUT 2
+#define PIN_DEBUG 8     // D8 optional: to trace rms interrupt activity on a scope
+#define DUT_INPUT 0     // the ADC input for the DUT voltage
+#define SHUNT_INPUT 2   // the ADC input for the DUT current
 
 // Rotary Encoder setup
 static int enc_A = 2; // D2 No filter caps used!
@@ -32,14 +31,6 @@ volatile byte reading = 0; //store the direct values we read from our interrupt 
 int pwmPin = 9;      // D9 PWM output connected to digital pin 9
 double const DACcalibAC = 1.0; // adjust the DAC for AC current output levels
 double const DACcalibDC = 1.0; // adjust the DAC for DC current output levels
-
-// ADC read low pass filter setup
-/* not used
-Ewma adcFilterV(0.1); // Analog DUT voltage filter 0.1 is low effect, 0.01 is high
-Ewma adcFilterA(0.1); // Analog shunt voltage filter
-Ewma dcFilterV(0.1);  // DC DUT voltage filter
-Ewma dcFilterA(0.1);  // DC shunt voltage filter
-*/
 
 // SSD1531 SPI declarations
 // Screen dimensions
@@ -92,18 +83,18 @@ boolean dc_mode_setup = false;
 Rms read_dut_Rms; // create an instance of Rms for the voltage
 Rms read_shunt_Rms; // and one for the shunt voltage
 double dutV; // holds the DUT volt value
-double dutVcalib = 10.0; // calibration for the /10 divider
+double dutVcalib = 1.01567; // calibration factor at mid-range
+double dutVdiv = 35.0;  // calibration for the input voltage divider /35
 double prev_dutV = 0.0; //keep track of value changes for display
-double shuntV; // holds the shunt volt value
-double const shuntVcalib = 10.0; // calibration for the 10x gain, match the DUT current display value
+double shuntV; // holds the shunt volt (current) value
+double const shuntVcalib = 1.0; // calibration for the 10x gain, match the DUT current display value
 double prev_shuntV = 0.0; // keep track of value changes for display
 volatile int request_adc = 0;
-double const dc_cal_factor1 = 1.03; // calibration factor < 25V
-double const dc_cal_factor2 = 1.04; // calibration factor > 25V
+double const dc_cal_factor = 1.0; // calibration factor
 double const vRef = 4.99155; // the actually measured VREF voltage on the Nano board.
 double const adc_conversion_factor = vRef / 1023.0; // for DC measurements, VREF voltage as measured
 
-volatile int period_counter = 1; // keep track of sampling
+volatile int period_counter = 1; // keep track of rms calculation sampling
 volatile int Measurement_completed = 0; // signal that aquisition is complete
 const float VoltRange = vRef; // Needed for the RMS calculation. Max ADC input voltage.
 
@@ -124,10 +115,10 @@ void setup()
 {
   Serial.begin(9600); // for debugging
   
-  pinMode(PIN_DEBUG, OUTPUT); // optional: so we can show activity on a scope
+  pinMode(PIN_DEBUG, OUTPUT); // optional: so we can show interrupt activity on a scope
   pinMode(DUT_Mode, INPUT_PULLUP); // Mode switch, default is AC
   
-  analogReference(EXTERNAL); // use an external 5V reference
+  analogReference(EXTERNAL); // Nano to use an external 5V reference
   analogRead(A0);  // force the voltage reference setting to be used and avoid an internal short
     
   Serial.println("start tft");
@@ -136,13 +127,14 @@ void setup()
   oledSetup();
 
   // configure RMS conversion for automatic base-line restoration and continuous scan mode:
-  read_dut_Rms.begin(VoltRange, RMS_WINDOW, ADC_10BIT, BLR_ON, CNT_SCAN);
-  read_dut_Rms.start(); //start measuring  
-
+  // We now use a hardware DUT voltage rms conversion by an LTC1966
+  //read_dut_Rms.begin(VoltRange, RMS_WINDOW, ADC_10BIT, BLR_ON, CNT_SCAN);
+  //read_dut_Rms.start(); //start measuring  
+  // We still use the software rms for the shunt voltage (DUT current)
   read_shunt_Rms.begin(VoltRange, RMS_WINDOW, ADC_10BIT, BLR_ON, CNT_SCAN);
   read_shunt_Rms.start(); //start measuring 
   
-  // setup the Nano registers
+  // setup the Nano registers for a faster PWM
   cli();  //stop interrupts while we run the setup, just in case...  
   // Change the PWM base frequency from the standard 488Hz to 3.906 Hz, this helps filtering to DC.
   TCCR1B = TCCR1B & 0b11111000 | 0x02;
@@ -184,7 +176,7 @@ ISR(TIMER0_COMPA_vect){//timer0 interrupt
 
   if (Measurement_completed == 0){
     digitalWriteFast(PIN_DEBUG, HIGH); // optional: show start of cycle on a scope
-    /* for software RMS sampling of the DUT voltage
+    /* for software RMS sampling of the DUT voltage : no longer used
     read_dut_Rms.update(analogRead(DUT_INPUT)); // for BLR_ON or for DC(+AC) signals with BLR_OFF
     */
     read_shunt_Rms.update(analogRead(SHUNT_INPUT)); // for BLR_ON or for DC(+AC) signals with BLR_OFF
@@ -241,7 +233,6 @@ void loop() {
       // we calculate the applied DUT current by software
       read_shunt_Rms.publish();
       float shuntVraw = read_shunt_Rms.rmsVal;
-      //shuntV = adcFilterA.filter(shuntVraw); // low-pass filter no longer used
       shuntV = shuntVraw * shuntVcalib; //  * shuntVcalib; // use the 10x input attenuator
       
       send_ac_to_monitor(); // for debugging 
@@ -252,7 +243,7 @@ void loop() {
       tft.setFont(&FreeSans9pt7b);
       tft.setTextSize(1);
       tft.setCursor(digit_3+8, stat_line); // from left side, down
-      tft.print(encoderPos * 20); // Using 20mA per step or click
+      tft.print(encoderPos * 10); // Using 10mA per step or click
       tft.setCursor(digit_5+10, stat_line); // from left side, down
       tft.print("mA"); 
      
@@ -273,17 +264,12 @@ void loop() {
     // DUT voltage
     double dutVraw = analogRead(DUT_INPUT) * adc_conversion_factor;  // adc bits to Volt conversion
     // dutV = dcFilterV.filter(dutVraw); low-pass filter, no longer used
-    dutVraw = (dutVraw * dutVcalib); // use the /10 input divider calibration
-    if (dutVraw < 25){
-      dutV = dutVraw * dc_cal_factor1; 
-    }else{
-      dutV = dutVraw * dc_cal_factor2;
-    }  
+    dutVraw = (dutVraw * dutVcalib * dutVdiv); // compensate for the /35 input divider and calibration
+    dutV = dutVraw * dc_cal_factor; // calibration
     
     // Shunt voltage = current
     double shuntVraw = analogRead(SHUNT_INPUT) * adc_conversion_factor; // adc to Volt conversion
-    // shuntV = dcFilterA.filter(shuntVraw); // low-pass filter, no longer used
-    shuntV = shuntVraw * shuntVcalib; // use the 10x Opamp gain correction value
+    shuntV = shuntVraw * shuntVcalib; // use the voltage and the calibration factor
 
     // print the Amp setting by the rotary encoder
     tft.fillRect(digit_3+8, stat_line-12, 128, 20, BLACK); // Status line clear with a black rectangular
@@ -291,7 +277,7 @@ void loop() {
     tft.setFont(&FreeSans9pt7b);
     tft.setTextSize(1);
     tft.setCursor(digit_3+8, stat_line); // from left side, down
-    tft.print(encoderPos * 20); // 20mA per step or click
+    tft.print(encoderPos * 10 * round(dutV/10)); // 10mA per click multiplied by DUT voltage/10
     tft.setCursor(digit_5+10, stat_line); // from left side, down
     tft.print("mA"); 
       
