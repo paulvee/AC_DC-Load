@@ -29,8 +29,8 @@ volatile byte reading = 0; //store the direct values we read from our interrupt 
 
 // Setup the poor man's DAC by using a PWM based version
 int pwmPin = 9;      // D9 PWM output connected to digital pin 9
-double const DACcalibAC = 1.0; // adjust the DAC for AC current output levels
-double const DACcalibDC = 1.0; // adjust the DAC for DC current output levels
+double const DACcalibAC = 0.7; // adjust the DAC for AC current output levels to match settings
+double const DACcalibDC = 1.0; // adjust the DAC for DC current output levels to match settings
 
 // SSD1531 SPI declarations
 // Screen dimensions
@@ -80,17 +80,21 @@ boolean dc_mode_setup = false;
 
 // setup the True RMS functionality
 #define RMS_WINDOW 40   // rms window of samples, 20 = 1 period @50Hz, 40 = 2
-Rms read_dut_Rms; // create an instance of Rms for the voltage
+Rms read_dut_Rms; // create an instance of Rms for the voltage20
 Rms read_shunt_Rms; // and one for the shunt voltage
 double dutV; // holds the DUT volt value
-double dutVcalib = 1.01567; // calibration factor at mid-range
-double dutVdiv = 35.0;  // calibration for the input voltage divider /35
+double dutVcalibDC = 1.25; // bridge loss factor
+double dutVcalibAC = 1.25; // bridge loss factor
+double dutVdivDC = 100.0;  // input voltage divider attenuator factor for DC
+double dutVdivAC = 100.0;  // input voltage divider attenuator factor for rms
 double prev_dutV = 0.0; //keep track of value changes for display
 double shuntV; // holds the shunt volt (current) value
-double const shuntVcalib = 1.0; // calibration for the 10x gain, match the DUT current display value
+double const shuntVcalibAC = 1.0; // calibration of setting versus actual DUT current
+double const shuntVcalibDC = 0.88; // calibration of setting versus actual DUT current
 double prev_shuntV = 0.0; // keep track of value changes for display
 volatile int request_adc = 0;
 double const dc_cal_factor = 1.0; // calibration factor
+double const ac_cal_factor = 1.0; // calibration factor
 double const vRef = 4.99155; // the actually measured VREF voltage on the Nano board.
 double const adc_conversion_factor = vRef / 1023.0; // for DC measurements, VREF voltage as measured
 
@@ -226,14 +230,14 @@ void loop() {
       // The output from the LTC1966 is 0..1V DC
       double dutVraw = analogRead(DUT_INPUT); // read the LTC output
       dutVraw = dutVraw * adc_conversion_factor;  // adc bits to Volt conversion
-      dutVraw = dutVraw * 10;  // attenuator
-      dutV = dutVraw; // casting
-      
+      dutVraw = (dutVraw * dutVdivAC) + dutVcalibAC ;  // compensate for the /100 input divider add the bridge loss factor
+      dutV = dutVraw * ac_cal_factor; // add a calibration factor
+     
       // get the shunt voltage = DUT current value
       // we calculate the applied DUT current by software
       read_shunt_Rms.publish();
       float shuntVraw = read_shunt_Rms.rmsVal;
-      shuntV = shuntVraw * shuntVcalib; //  * shuntVcalib; // use the 10x input attenuator
+      shuntV = shuntVraw * shuntVcalibAC * 2; // use the 10x input attenuator
       
       send_ac_to_monitor(); // for debugging 
        
@@ -243,12 +247,13 @@ void loop() {
       tft.setFont(&FreeSans9pt7b);
       tft.setTextSize(1);
       tft.setCursor(digit_3+8, stat_line); // from left side, down
-      tft.print(encoderPos * 10); // Using 10mA per step or click
+      tft.print(encoderPos * 10 ); // nominal 10mA per click
       tft.setCursor(digit_5+10, stat_line); // from left side, down
       tft.print("mA"); 
      
       Measurement_completed = 0; // restart the measurement cycle
       } // end of AC measurement
+  
   }else{ // We're measuring DC
     // note that in the DC mode, we do not set the global measurement_completed var so the Timer is not triggering the sampling 
     // we pick-up the ADC readings here during the normal loop execution, which is OK for DC signals.
@@ -264,12 +269,12 @@ void loop() {
     // DUT voltage
     double dutVraw = analogRead(DUT_INPUT) * adc_conversion_factor;  // adc bits to Volt conversion
     // dutV = dcFilterV.filter(dutVraw); low-pass filter, no longer used
-    dutVraw = (dutVraw * dutVcalib * dutVdiv); // compensate for the /35 input divider and convert to volts
+    dutVraw = (dutVraw * dutVdivDC) + dutVcalibDC ; // compensate for the /100 input divider add the bridge loss factor
     dutV = dutVraw * dc_cal_factor; // add a calibration factor
     
     // Shunt voltage = current
     double shuntVraw = analogRead(SHUNT_INPUT) * adc_conversion_factor; // adc to Volt conversion
-    shuntV = shuntVraw * shuntVcalib; // use the voltage and the calibration factor
+    shuntV = shuntVraw * shuntVcalibDC; // add the calibration factor
 
     // print the Amp setting by the rotary encoder
     tft.fillRect(digit_3+8, stat_line-12, 128, 20, BLACK); // Status line clear with a black rectangular
@@ -277,9 +282,9 @@ void loop() {
     tft.setFont(&FreeSans9pt7b);
     tft.setTextSize(1);
     tft.setCursor(digit_3+8, stat_line); // from left side, down
-    // Here we add in the DUT voltage effect on the DUT current
-    // Rounding the DUT voltage has the side effect that the step resolution changes with the voltage
-    tft.print(encoderPos * 10 * round(dutV/10)); // nominal 10mA per click multiplied by DUT voltage/10
+    // Here we add in the DUT voltage effect to the DUT current setting
+    // Multiplying and rounding the DUT voltage has the side effect that the step resolution changes with the voltage
+    tft.print(encoderPos * 10 ); // nominal 10mA per click
     tft.setCursor(digit_5+10, stat_line); // from left side, down
     tft.print("mA"); 
       
