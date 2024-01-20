@@ -61,8 +61,9 @@ double const DACcalibDC = 1.0; // adjust the DAC for DC current output levels to
 Adafruit_SSD1351 tft = Adafruit_SSD1351(cs, dc, rst); // others are defaults
 
 // OLED display vertical line positions
-int v_line = 30;    // Volt/Watt/Ohm line
-int a_line = 65;    // Amp line
+int v_line = 25;    // Volt line 30
+int a_line = 57;    // Amp line 65
+int p_line = 62;    // Power line
 int stat_line = 100; // Status line
 int menu_line = 118; // Menu line
 
@@ -96,7 +97,9 @@ volatile int request_adc = 0;
 double const dc_cal_factor = 1.0; // calibration factor
 double const ac_cal_factor = 1.0; // calibration factor
 double const vRef = 4.99155; // the actually measured VREF voltage on the Nano board.
-double const adc_conversion_factor = vRef / 1023.0; // for DC measurements, VREF voltage as measured
+double const adc_conversion_factor = vRef / 1023.0; // for ADC measurements, actual VREF voltage as measured
+double DUT_Power = 0.0; // holds the Watt calculation
+double prev_DUT_Power = 0.0; //keep track of value changes for display
 
 volatile int period_counter = 1; // keep track of rms calculation sampling
 volatile int Measurement_completed = 0; // signal that aquisition is complete
@@ -242,13 +245,13 @@ void loop() {
       send_ac_to_monitor(); // for debugging 
        
       // print the Amp setting
-      tft.fillRect(digit_3+8, stat_line-12, 128, 20, BLACK); // Status line clear with a black rectangular
+      tft.fillRect(digit_3+8, a_line, 128, 20, YELLOW); // Status line clear with a black rectangular
       tft.setTextColor(WHITE);
       tft.setFont(&FreeSans9pt7b);
       tft.setTextSize(1);
-      tft.setCursor(digit_3+8, stat_line); // from left side, down
+      tft.setCursor(digit_3+8, a_line); // from left side, down
       tft.print(encoderPos * 10 ); // nominal 10mA per click
-      tft.setCursor(digit_5+10, stat_line); // from left side, down
+      tft.setCursor(digit_5+10, a_line); // from left side, down
       tft.print("mA"); 
      
       Measurement_completed = 0; // restart the measurement cycle
@@ -265,7 +268,6 @@ void loop() {
       ac_mode_setup = false;
     }
 
-
     // DUT voltage
     double dutVraw = analogRead(DUT_INPUT) * adc_conversion_factor;  // adc bits to Volt conversion
     // dutV = dcFilterV.filter(dutVraw); low-pass filter, no longer used
@@ -275,6 +277,12 @@ void loop() {
     // Shunt voltage = current
     double shuntVraw = analogRead(SHUNT_INPUT) * adc_conversion_factor; // adc to Volt conversion
     shuntV = shuntVraw * shuntVcalibDC; // add the calibration factor
+    
+    // calculate the DUT Power
+    DUT_Power = dutV * shuntV;
+    // limit to 2 decimals
+    temp = (int (DUT_Power * 100));
+    DUT_Power = double (temp) / 100;
 
     // print the Amp setting by the rotary encoder
     tft.fillRect(digit_3+8, stat_line-12, 128, 20, BLACK); // Status line clear with a black rectangular
@@ -301,7 +309,7 @@ void loop() {
     tft.setTextColor(BLUE);
     tft.setFont(&FreeSans18pt7b);
     tft.setTextSize(1);
-    tft.fillRect(digit_1, 5, digit_4+22, 27, BLACK); // line = 5; clear digits with a black rectangular
+    tft.fillRect(digit_1, 0, digit_4+22, 27, BLACK); // line = 0; clear digits with a black rectangular
     if (dutV > 99.99){ // prevent overflow which messes the display
       dutV = 99.99;
     }  
@@ -324,7 +332,7 @@ void loop() {
     tft.setTextColor(GREEN);
     tft.setFont(&FreeSans18pt7b);
     tft.setTextSize(1);
-    tft.fillRect(digit_1, 40, digit_4+22, 27, BLACK); // line = 15; clear digits with a black rectangular
+    tft.fillRect(digit_1, a_line-25, digit_4+22, 27, BLACK); // clear digits with a black rectangular
     if (shuntV > 9.99){ // prevent overflow which messes the display
       shuntV = 9.99;
     }
@@ -335,47 +343,57 @@ void loop() {
     }
     tft.print(String(shuntV));  // send to OLED display
   }
-  // print the rotary switch position
- // if(oldEncPos != encoderPos) {
-    tft.fillRect(0, stat_line+4, 128, 20, BLACK); // line clear with a black rectangular
+
+  // print the power in Watt
+  if (prev_DUT_Power != DUT_Power){
+    prev_DUT_Power = DUT_Power;
+    tft.fillRect(digit_1, p_line, digit_4+22, 20, BLACK);  // p-line clear with a black rectangular
     tft.setTextColor(WHITE);
     tft.setFont(&FreeSans9pt7b);
     tft.setTextSize(1);
-    tft.setCursor(0, stat_line+18); // from left side, down
-    tft.print(encoderPos);
- // }
+    tft.setCursor(digit_3+5, p_line + 17); // from left side, down
+    tft.print(String(DUT_Power));  // send to OLED display
+    }
   delay(500); // only for testing, remove for final version
 }
 
 
 void send_ac_to_monitor(){
-  // print the ac values to the monitor
+  // print the values to the monitor
   Serial.print(dutV,4);
   Serial.print(" V_rms\t");
 //    Serial.print(", ");
 //    Serial.println(read_dut_Rms.dcBias); // show the ADC bits
 
   Serial.print(shuntV,4);
-  Serial.println(" A_rms"); 
+  Serial.print(" A_rms\t"); 
 //    Serial.print(", ");
 //    Serial.println(read_shunt_Rms.dcBias); // show the ADC bits
-  
+
+  Serial.print(DUT_Power, 2);
+  Serial.println(" Watt");  
 }
 
 void send_dc_to_monitor(){
   // print the dc values to the monitor
   Serial.print("Vdc = ");
   Serial.print(dutV, 4);
-  
-  Serial.print("  Adc = ");
-  Serial.println(shuntV, 4);  
+  Serial.print(" V\t"); 
+
+  Serial.print("Adc = ");
+  Serial.print(shuntV, 4);
+  Serial.print(" A\t"); 
+
+  Serial.print(DUT_Power, 2);
+  Serial.println(" Watt");   
 }
 
 
 void setup_oled_ac(){
   // clear the display fields 
-  tft.fillRect(digit_1, 5, 128, 27, BLACK); // V line clear with a black rectangular
-  tft.fillRect(digit_1, 40, 128, 27, BLACK); // A line
+  tft.fillRect(digit_1, v_line-24, 128, 27, BLACK); // V line clear with a black rectangular
+  tft.fillRect(digit_1, a_line-24, 128, 27, BLACK); // A line
+  tft.fillRect(digit_1, p_line, 128, 20, BLACK);  // P line
 
   // print the Volt suffix
   tft.setTextColor(BLUE);
@@ -397,6 +415,13 @@ void setup_oled_ac(){
   tft.setCursor(digit_5+24, a_line - 15); // this will cause a subscript level
   tft.println("rms");
 
+  // print the power suffix
+  tft.setTextColor(WHITE);
+  tft.setFont(&FreeSans9pt7b);
+  tft.setTextSize(1);
+  tft.setCursor(digit_5+10, p_line + 17); // from left side, down
+  tft.print("W");  
+
   // print the mode
   tft.fillRect(digit_1, stat_line-12, 128, 20, BLACK); // V line clear with a black rectangular
   tft.setTextColor(WHITE);
@@ -404,21 +429,15 @@ void setup_oled_ac(){
   tft.setTextSize(1);
   tft.setCursor(0, stat_line); // from left side, down
   tft.print("AC");  
-
-  // print the rotary switch position
-  tft.fillRect(0, stat_line+4, 128, 20, BLACK); // line clear with a black rectangular
-  tft.setTextColor(WHITE);
-  tft.setFont(&FreeSans9pt7b);
-  tft.setTextSize(1);
-  tft.setCursor(0, stat_line+18); // from left side, down
-  tft.print(encoderPos);   
+  
 }
 
 
 void setup_oled_dc(){
   // clear the display fields 
-  tft.fillRect(digit_1, 5, 128, 27, BLACK); // V line clear with a black rectangular
-  tft.fillRect(digit_1, 40, 128, 27, BLACK); // A line
+  tft.fillRect(digit_1, v_line-24, 128, 27, BLACK); // V line clear with a black rectangular
+  tft.fillRect(digit_1, a_line-24, 128, 27, BLACK); // A line
+  tft.fillRect(digit_1, p_line, 128, 20, BLACK);  // P line
 
   // print the Volt suffix
   tft.setFont();
@@ -432,21 +451,21 @@ void setup_oled_dc(){
   tft.setCursor(digit_5+10, a_line - 13); 
   tft.println("A");
 
+  // print the power suffix
+  tft.setTextColor(WHITE);
+  tft.setFont(&FreeSans9pt7b);
+  tft.setTextSize(1);
+  tft.setCursor(digit_5+10, p_line + 17); // from left side, down
+  tft.print("W");  
+
   // print the mode
-  tft.fillRect(digit_1, stat_line-12, 128, 20, BLACK); // V line clear with a black rectangular
+  tft.fillRect(digit_1, stat_line-12, 128, 20, BLACK); // stat line clear with a black rectangular
   tft.setTextColor(WHITE);
   tft.setFont(&FreeSans9pt7b);
   tft.setTextSize(1);
   tft.setCursor(0, stat_line); // from left side, down
   tft.print("DC");  
 
-  // print the rotary switch position
-  tft.fillRect(0, stat_line+4, 128, 20, BLACK); // line clear with a black rectangular
-  tft.setTextColor(WHITE);
-  tft.setFont(&FreeSans9pt7b);
-  tft.setTextSize(1);
-  tft.setCursor(0, stat_line+18); // from left side, down
-  tft.print(encoderPos);    
 }
 
 
