@@ -14,9 +14,10 @@
 #include <SPI.h>  // communication method for the display
 #include <TrueRMS.h>  // True RMS library: https://github.com/MartinStokroos/TrueRMS
 
+#define vRef 4991       // the actually measured VREF in mV on the Nano board.
 #define PIN_DEBUG 8     // D8 optional: to trace rms interrupt activity on a scope
-#define DUT_INPUT 0     // the ADC input for the DUT voltage
-#define SHUNT_INPUT 2   // the ADC input for the DUT current
+#define DUT_INPUT A0    // the ADC input for the DUT voltage
+#define SHUNT_INPUT A2  // the ADC input for the DUT current
 
 // Rotary Encoder setup
 static int enc_A = 2; // D2 No filter caps used!
@@ -29,9 +30,9 @@ volatile byte prev_encoderPos = encoderPos; //stores the last encoder position t
 volatile byte reading = 0; //store the direct values we read from our interrupt pins before checking to see if we have moved a whole detent
 
 // Setup the poor man's DAC by using a PWM based version
-int pwmPin = 9;      // D9 PWM output connected to digital pin 9
+int pwmPin = 9;      // D9 PWM output connected to digital pin 9 with increased frequency of 4KHz
 double const DACcalibAC = 1.0; // adjust the DAC for AC current output levels to match settings
-double const DACcalibDC = 1.2195; // adjust the DAC for DC current output levels to match settings
+double const DACcalibDC = 0.4; // adjust the DAC for DC current output levels to match settings
 
 // SSD1531 SPI declarations
 // Screen dimensions
@@ -68,7 +69,7 @@ int p_line = 62;    // Power line
 int stat_line = 100; // Status line
 int menu_line = 118; // Menu line
 
-// Horizontal starting positions for the 5 digits
+// Horizontal starting positions for the 5 large digits
 int digit_1 = 0;
 int digit_2 = 20;
 int digit_3 = 45;
@@ -89,22 +90,60 @@ double prev_dutV = dutV; //keep track of value changes for display
 double bridgeCal = 1.25; // bridge loss factor for AC mode
 double dutVdivDC = 100.0;  // input voltage divider attenuator factor for DC
 double dutVdivAC = 100.0;  // input voltage divider attenuator factor for rms
-double shuntV = 0.0; // holds the shunt volt (current) value
+double shuntV; // holds the shunt volt (current) value
 double prev_shuntV = 1.0; // keep track of value changes for display
 double const shuntVcalibAC = 1.0; // calibration of setting versus actual DUT current
-double const shuntVcalibDC = 0.906; // calibration of setting versus actual DUT current
+double const shuntVcalibDC = 1.0; // calibration of setting versus actual DUT current
 volatile int request_adc = 0;
 double const dc_offset_factor = 1.0; // voltage calibration factor for low voltages
-double const dc_cal_factor = 1.0376; // voltage calibration factor
+double const dc_cal_factor = 1.0; // voltage calibration factor
 double const ac_cal_factor = 1.0; // calibration factor
-double const vRef = 4.99155; // the actually measured VREF voltage on the Nano board.
-double const adc_conversion_factor = vRef / 1023.0; // for ADC measurements, actual VREF voltage as measured
+double const vScale = vRef; // measure the ADC with an actual input voltage just less of the maximum input 
+                            // and use that voltage in mVolt instead of the Vref
+double vOffset = 3;         // apply a low voltage and note the difference between the ADC reading and the applied voltage.
 double dutPower = 0.0; // holds the power in Watt calculation
-double prev_dutPower = 1.0; //keep track of value changes for display
+double prev_dutPower = 1.0; // keep track of value changes for display
+
+int readAvg = 5;  // use 5 samples to average the ADC readings
 
 volatile int period_counter = 1; // keep track of rms calculation sampling
 volatile int Measurement_completed = 0; // signal that aquisition is complete
 const float VoltRange = vRef; // Needed for the RMS calculation. Max ADC input voltage.
+
+int set_current = 0;  // in the CC mode we set the current by the encoder
+int set_power = 0;
+int set_resistance = 0;
+int DAC = 0;          // the value that goes to the PWM based DAC
+int prev_DAC = 0;     // keep track of value changes for display
+
+int counter = 500; // used to limit the OLED updates, start with a display
+
+enum {current, power, resistance} mode = current;
+char *modeStrings[] = {"CC", "CP", "CR"};
+char *suffixStrings[] = {"mA", "mW", "mR"};
+int prev_mode = mode;
+
+uint8_t ohmSymbol[] = {
+  B01110,
+  B10001,
+  B10001,
+  B10001,
+  B01010,
+  B01010,
+  B11011,
+  B00000
+};
+
+uint8_t degreeSymbol[] = {
+  B00110,
+  B01001,
+  B01001,
+  B00110,
+  B00000,
+  B00000,
+  B00000,
+  B00000
+};
 
 
 /*
@@ -112,10 +151,14 @@ const float VoltRange = vRef; // Needed for the RMS calculation. Max ADC input v
  */
 void setup_oled_ac();
 void setup_oled_dc();
+void display_values();
 void send_volt();
 void send_current();
 void send_power();
 void send_encoder();
+void send_dac();
+void send_mode();
+void send_to_monitor();
 void send_ac_to_monitor(); // for debugging
 void send_dc_to_monitor(); // for debugging
 void oledSetup();
@@ -130,7 +173,7 @@ void setup()
   pinMode(PIN_DEBUG, OUTPUT); // optional: so we can show interrupt activity on a scope
   pinMode(DUT_Mode, INPUT_PULLUP); // Mode switch, default is AC
   
-  analogReference(EXTERNAL); // Nano to use an external 5V reference
+  analogReference(EXTERNAL); // Nano to use the external VCC or an internal 1.1V reference 
   analogRead(A0);  // force the voltage reference setting to be used and avoid an internal short
     
   Serial.println("start tft");
@@ -166,6 +209,7 @@ void setup()
   attachInterrupt(0, enc_a_isr,RISING);
   attachInterrupt(1, enc_b_isr,RISING);
 
+  mode = current;
 }
 
 
@@ -204,15 +248,16 @@ ISR(TIMER0_COMPA_vect){//timer0 interrupt
 
 
 void loop() {
-  int temp;
+  int temp; // used in the value calculations
+
   // check the mode we're in, read the switch
   int measure_mode = digitalRead(DUT_Mode); // High is AC, low is DC
 
   // read the rotary encoder switch value and set the PWM/DAC output accordingly
-  // 0..255 is 0..5V in 20mV steps or 20mA current steps
+  // 0..255 is 0..5V in 20mV/mA/mW/mOhm steps 
   if(prev_encoderPos != encoderPos) {
     prev_encoderPos = encoderPos;
-    // send the encoder Amp setting by the rotary encoder to the OLED display
+    // send the encoder setting and the mode suffix to the OLED display
     send_encoder();
   } 
 
@@ -226,15 +271,12 @@ void loop() {
 
     /////// =====  AC Measurements
 
-    // output the DAC value
-    analogWrite(pwmPin, encoderPos * DACcalibAC); // AC mode 0..255
-
     if (Measurement_completed == 1){
       // get the DUT voltage
       // The True RMS calculation for the DUT voltage is done by the LTC1966
       // The output from the LTC1966 is 0..1V DC
-      double dutVraw = analogRead(DUT_INPUT); // read the LTC output
-      dutVraw = dutVraw * adc_conversion_factor;  // adc bits to Volt conversion
+      double dutVraw = readADC(DUT_INPUT, readAvg); // read the LTC output, avg
+      dutVraw = ((dutVraw + vOffset) * vScale) /1024;  // adc bits to Volt conversion
       dutVraw = (dutVraw * dutVdivAC) + bridgeCal;  // compensate for the /100 input divider add the bridge loss factor
       dutV = dutVraw * ac_cal_factor; // add a calibration factor       
 
@@ -245,6 +287,9 @@ void loop() {
       shuntV = shuntVraw * shuntVcalibAC * 2; // use the 10x input attenuator 
 
       Measurement_completed = 0; // restart the rms measurement cycle
+
+    // output the DAC value
+    analogWrite(pwmPin, encoderPos * DACcalibAC); // AC mode 0..255
 
     } // end of AC calculations
   } // end-of AC measurement mode
@@ -260,26 +305,115 @@ void loop() {
       dc_mode_setup = true;
       ac_mode_setup = false;
     }
-    // output the DAC value to set the DUT current
-    analogWrite(pwmPin, encoderPos * DACcalibDC); // DC mode 0..255
 
     // The calculation for the DUT voltage is done by the LTC1966
     // obtain the output and calculate the DC DUT voltage
-    double dutVraw = analogRead(DUT_INPUT) * adc_conversion_factor;  // adc bits to Volt conversion
-    dutVraw = (dutVraw * dutVdivDC) ; // compensate for the /100 input divider add the offset
-    dutV = (dutVraw * dc_cal_factor)+ dc_offset_factor ; // add a calibration factor
+    double dutVraw = readADC(DUT_INPUT, readAvg); // avg 
+    dutVraw = ((dutVraw + vOffset) * vScale) / 1024;  // adc bits to Volt conversion
+    dutV = (dutVraw * dc_cal_factor) / 10; //+ dc_offset_factor ; // add a calibration factor
     temp = (int (dutV * 100));   // use a trick forcing only two decimals for display
     dutV = double (temp) / 100;   
     
     // Calculate DC Shunt voltage = current
     // We read the voltage across the sense resistor
-    double shuntVraw = analogRead(SHUNT_INPUT) * adc_conversion_factor; // adc to Volt conversion
-    shuntV = shuntVraw * shuntVcalibDC; // add the calibration factor
+    double shuntVraw = readADC(SHUNT_INPUT, readAvg); // adc to Volt conversion, avg 
+    shuntV = ((shuntVraw + vOffset) * vScale) / 1024; // adc bits to Volt conversion
+    shuntV = shuntV * shuntVcalibDC / 1000; // add the calibration factor
     temp = (int (shuntV * 100)); // use a trick forcing only two decimals for display & update compare
     shuntV = double (temp) / 100; 
 
+    // calculate the DUT Power in Watts
+    dutPower = dutV * shuntV;
+    temp = (int (dutPower * 100)); // trick to limit to 2 decimals
+    dutPower = double (temp) / 100;
+
   } // end of DC mode calculations   
 
+
+  // Depending on the mode (CC, CV.CW, CR), we use the encoder to set the mode factor
+  // So in CC, we set the current with the decoder, in the CV mode, we set the voltage
+  // in the CW mode we set the wattage and in the CR mode we set the resistance
+  switch (mode)
+    {
+      case current:
+        // CC Mode
+        set_current = encoderPos; // 10mA per click
+
+        if (set_current > shuntV*100){ // shuntV is in mV, convert to decimals
+          DAC = DAC + 1;
+          if(DAC > 255){
+            DAC = 255;
+          }
+        }else{
+          DAC = DAC - 1;
+          if(DAC < 0){
+            DAC = 0;
+          }
+        }
+        break;
+      case power:
+        // CP Mode
+        set_power = encoderPos; // 10mW per click
+
+        if (set_power > dutPower*100){ // 
+          DAC = DAC + 1;
+          if(DAC > 255){
+            DAC = 255;
+          }
+        }else{
+          DAC = DAC - 1;
+          if(DAC < 0){
+            DAC = 0;
+          }
+        }
+        break;
+      case resistance:
+        // Resistance Mode - DOES NOT WORK, DO NOT USE
+        set_resistance = encoderPos*100; // 10mOhm per click
+
+        if (dutV/set_resistance*100 < shuntV*100){ // 
+          DAC = DAC + 1;
+          if(DAC > 255){
+            DAC = 255;
+          }
+        }else{
+          DAC = DAC - 1;
+          if(DAC < 0){
+            DAC = 0;
+          }
+        }
+        break;
+    }
+
+  // output the DAC value to set the DUT current
+  analogWrite(pwmPin, DAC); // DAC 0..255
+  // display the DAC value on the OLED display 
+
+  if (counter == 500){
+    display_values();
+    send_to_monitor(); // for debugging 
+  }
+
+  if (counter > 500){
+    counter = 0;
+  }
+  counter++;
+
+} // end-of loop()
+
+
+float readADC(int adc, int n) { //take and average n values to reduce noise; return average
+  float reading = analogRead(adc); //dummy read
+  reading = 0;
+  for (int i = 0; i < n; i++) {
+    reading += analogRead(adc);
+  }
+  float average = reading / n;
+  return (average);
+}
+
+
+void display_values() {
   // display the DUT voltage on the OLED display         
   if (prev_dutV != dutV){ // only update changes to reduce flashing of the OLED
     prev_dutV = dutV; // reset compare value
@@ -291,21 +425,26 @@ void loop() {
     prev_shuntV = shuntV;  // reset compare value
     send_current();
   }
-
-  // calculate and display the DUT Power
-  dutPower = dutV * shuntV;
-  temp = (int (dutPower * 100)); // trick to limit to 2 decimals
-  dutPower = double (temp) / 100;
-  // display the DUT power in Watt
+  // display the power in Watt
   if (prev_dutPower != dutPower){
     prev_dutPower = dutPower;
     send_power();
   }
 
-  send_to_monitor(); // for debugging 
+  // display the DAC value (for testing)
+  if (prev_DAC != DAC){ // only update changes to reduce flashing of the OLED
+  prev_DAC = DAC; // reset compare value
+    send_dac();
+  }
 
-  delay(500); // only for testing, remove for final version
-} // end-of loop()
+  // display the mode
+  if (prev_mode != mode){
+    prev_mode = mode;
+    send_mode();
+  }
+}
+
+
 
 void send_volt(){
   tft.setTextColor(BLUE);
@@ -350,32 +489,58 @@ void send_power(){
 }
 
 void send_encoder(){
-  tft.fillRect(digit_3+8, stat_line-12, 128, 20, BLACK); // Status line block clear with a black rectangular
+  tft.fillRect(digit_3+8, stat_line-12, 128, 20, BLACK); // Status fie block clear with a black rectangular
   tft.setTextColor(WHITE);
   tft.setFont(&FreeSans9pt7b);
   tft.setTextSize(1);
   tft.setCursor(digit_3+8, stat_line); // from left side, down
-  // Here we add in the DUT voltage effect to the DUT current setting
-  // Multiplying and rounding the DUT voltage has the side effect that the step resolution changes with the voltage
-  tft.print(encoderPos * 10 ); // nominal 10mA per click
+  tft.print(encoderPos * 10 ); // nominal 10mX per click
   tft.setCursor(digit_5+10, stat_line); // from left side, down
-  tft.print("mA"); 
+  tft.print(suffixStrings[mode]); 
 }
+
+void send_dac(){
+  tft.fillRect(digit_3+8, stat_line+6, 128, 20, BLACK); // Status line block clear with a black rectangular
+  tft.setTextColor(WHITE);
+  tft.setFont(&FreeSans9pt7b);
+  tft.setTextSize(1);
+  tft.setCursor(digit_3+8, stat_line+20); // from left side, down
+  tft.print(DAC ); // DAC value
+}
+
+void send_mode(){
+  tft.fillRect(digit_1, stat_line-15, 30, 20, BLACK); // mode field clear with a black rectangular
+  tft.setTextColor(BLUE);
+  tft.setFont(&FreeSans9pt7b);
+  tft.setTextSize(1);
+  tft.setCursor(0, stat_line); // from left side, down
+  tft.print(modeStrings[mode]);  
+}
+
 
 void send_to_monitor(){
   // print the values to the IDE monitor
-  Serial.print(dutV,4);
+  Serial.print(dutV,2);
   Serial.print(" V_rms\t");
 //    Serial.print(", ");
 //    Serial.println(read_dut_Rms.dcBias); // show the ADC bits
 
-  Serial.print(shuntV,4);
+  Serial.print(shuntV,2);
   Serial.print(" A_rms\t"); 
 //    Serial.print(", ");
 //    Serial.println(read_shunt_Rms.dcBias); // show the ADC bits
 
   Serial.print(dutPower,2);
-  Serial.println(" Watt");  
+  Serial.print(" Watt\t"); 
+
+  Serial.print(DAC);
+  Serial.print("\t");
+
+  Serial.print(set_resistance);
+  Serial.print(" mOhm\t");
+
+  Serial.print(dutV/set_resistance*100,2);
+  Serial.println(" mOhm");
 }
 
 
@@ -447,7 +612,7 @@ void setup_oled_dc(){
   tft.setTextSize(1);
   tft.setCursor(digit_5+10, p_line + 17); // from left side, down
   tft.print("W");  
-
+  /*
   // print the mode
   tft.fillRect(digit_1, stat_line-12, 128, 20, BLACK); // stat line clear with a black rectangular
   tft.setTextColor(WHITE);
@@ -455,7 +620,7 @@ void setup_oled_dc(){
   tft.setTextSize(1);
   tft.setCursor(0, stat_line); // from left side, down
   tft.print("DC");  
-
+  */
 }
 
 
