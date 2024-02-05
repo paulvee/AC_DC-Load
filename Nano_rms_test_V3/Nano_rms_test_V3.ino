@@ -369,7 +369,7 @@ void loop() {
         }
         break;
       case resistance:
-        // Resistance Mode - DOES NOT WORK, DO NOT USE
+        // Resistance Mode
         set_resistance = encoderPos*100; // 100mOhm per click
 
         if (set_resistance > shuntV*1000){ //
