@@ -209,7 +209,8 @@ void setup()
   attachInterrupt(0, enc_a_isr,RISING);
   attachInterrupt(1, enc_b_isr,RISING);
 
-  mode = current;
+  // manually setting the measurement mode
+  mode = resistance;
 }
 
 
@@ -369,9 +370,9 @@ void loop() {
         break;
       case resistance:
         // Resistance Mode - DOES NOT WORK, DO NOT USE
-        set_resistance = encoderPos*100; // 10mOhm per click
+        set_resistance = encoderPos*100; // 100mOhm per click
 
-        if (dutV/set_resistance*100 < shuntV*100){ // 
+        if (set_resistance > shuntV*1000){ //
           DAC = DAC + 1;
           if(DAC > 255){
             DAC = 255;
@@ -398,6 +399,7 @@ void loop() {
     counter = 0;
   }
   counter++;
+  delay(1);
 
 } // end-of loop()
 
@@ -445,7 +447,6 @@ void display_values() {
 }
 
 
-
 void send_volt(){
   tft.setTextColor(BLUE);
   tft.setFont(&FreeSans18pt7b);
@@ -489,12 +490,16 @@ void send_power(){
 }
 
 void send_encoder(){
-  tft.fillRect(digit_3+8, stat_line-12, 128, 20, BLACK); // Status fie block clear with a black rectangular
+  tft.fillRect(digit_3+8, stat_line-12, 128, 20, BLACK); // Status block clear with a black rectangular
   tft.setTextColor(WHITE);
   tft.setFont(&FreeSans9pt7b);
   tft.setTextSize(1);
   tft.setCursor(digit_3+8, stat_line); // from left side, down
-  tft.print(encoderPos * 10 ); // nominal 10mX per click
+  if (mode == resistance){
+    tft.print(encoderPos * 100 ); // nominal 10mX per click    
+  }else{
+    tft.print(encoderPos * 10 ); // nominal 10mX per click
+  }
   tft.setCursor(digit_5+10, stat_line); // from left side, down
   tft.print(suffixStrings[mode]); 
 }
@@ -517,7 +522,6 @@ void send_mode(){
   tft.print(modeStrings[mode]);  
 }
 
-
 void send_to_monitor(){
   // print the values to the IDE monitor
   Serial.print(dutV,2);
@@ -537,10 +541,8 @@ void send_to_monitor(){
   Serial.print("\t");
 
   Serial.print(set_resistance);
-  Serial.print(" mOhm\t");
-
-  Serial.print(dutV/set_resistance*100,2);
   Serial.println(" mOhm");
+
 }
 
 
