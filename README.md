@@ -9,6 +9,6 @@ Nano-rms-test is the latest functioning prototype for the complete dynamic AC/DC
 
 Nano-rms-test-V2 is the version that supports the True RMS LTC1966 chip that I now use for the DUT voltage measurements. This version supports the Power calculation, but the display code for the OLED only works for the DC mode. I did not finish the AC mode. That is done in V3.
 
-Nano_rms_test-V3 is the version that supports the relay for the AC-DC selection. This is the version that I'm working with now and went through quite a bit of reconstructing to make the code cleaner.
+Nano_rms_test-V3 is the version that supports the selection for the AC-DC input by a switch. Pressing the rotary decoder button will cycle through the Constant Current, Constant Power and Constant Resistance modes. It does not have any calibration data in it. This is the version that I'm working with now and went through quite a bit of reconstructing to make the code cleaner.
 
 Measure_example_rms is a fully functional, interrupt driven rms calculator using the Nano ADC0 input
