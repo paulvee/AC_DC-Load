@@ -22,7 +22,7 @@
 // Rotary Encoder setup
 static int enc_A = 2; // D2 No filter caps used!
 static int enc_B = 3; // D3 No filter caps used!
-static int enc_But = 7; // D7 No filter caps used!
+static int enc_But = 7; // PC0; // also ADC0 - No filter caps used!
 volatile byte aFlag = 0; // expecting a rising edge on pinA encoder has arrived at a detent
 volatile byte bFlag = 0; // expecting a rising edge on pinB encoder has arrived at a detent (opposite direction to when aFlag is set)
 volatile byte encoderPos = 0; //current value of encoder position (0-255). Change to int or uin16_t for larger values
@@ -30,7 +30,7 @@ volatile byte prev_encoderPos = encoderPos; //stores the last encoder position t
 volatile byte reading = 0; //store the direct values we read from our interrupt pins before checking to see if we have moved a whole detent
 
 // Setup the poor man's DAC by using a PWM based version
-int pwmPin = 9;      // D9 PWM output connected to digital pin 9 with increased frequency of 4KHz
+int pwmPin = 9;      // D9 PWM output (OC1A) connected to digital pin 9 with increased frequency of 4KHz
 double const DACcalibAC = 1.0; // adjust the DAC for AC current output levels to match settings
 double const DACcalibDC = 0.4; // adjust the DAC for DC current output levels to match settings
 
@@ -80,6 +80,7 @@ int digit_5 = 86;
 #define DUT_Mode 10 // use pin D10 for the toggle switch
 boolean ac_mode_setup = false; // default for the startup
 boolean dc_mode_setup = false;
+boolean measure_mode; // ac or dc input mode
 
 // setup the True RMS functionality
 #define RMS_WINDOW 40   // rms window of samples, 20 = 1 period @50Hz, 40 = 2
@@ -123,28 +124,6 @@ char *modeStrings[] = {"CC", "CP", "CR"};
 char *suffixStrings[] = {"mA", "mW", "mR"};
 int prev_mode = mode;
 
-uint8_t ohmSymbol[] = {
-  B01110,
-  B10001,
-  B10001,
-  B10001,
-  B01010,
-  B01010,
-  B11011,
-  B00000
-};
-
-uint8_t degreeSymbol[] = {
-  B00110,
-  B01001,
-  B01001,
-  B00110,
-  B00000,
-  B00000,
-  B00000,
-  B00000
-};
-
 
 /*
  * Some Forward Function Declarations
@@ -159,6 +138,7 @@ void send_encoder();
 void send_dac();
 void send_mode();
 void send_to_monitor();
+void send_acdc_input();
 void send_ac_to_monitor(); // for debugging
 void send_dc_to_monitor(); // for debugging
 void oledSetup();
@@ -169,10 +149,11 @@ void enc_b_isr();
 void setup() 
 {
   Serial.begin(9600); // for debugging
-  
-  pinMode(PIN_DEBUG, OUTPUT); // optional: so we can show interrupt activity on a scope
+
+  pinMode(PIN_DEBUG, OUTPUT); // optional: so we can show interrupt or loop duration activity on a scope
   pinMode(DUT_Mode, INPUT_PULLUP); // Mode switch, default is AC
-  
+  pinMode(enc_But, INPUT_PULLUP); // Encoder push button
+
   analogReference(EXTERNAL); // Nano to use the external VCC or an internal 1.1V reference 
   analogRead(A0);  // force the voltage reference setting to be used and avoid an internal short
     
@@ -190,12 +171,15 @@ void setup()
   read_shunt_Rms.start(); //start measuring 
   
   // setup the Nano registers for a faster PWM
+  // we use pin 9 and Timer1, a 16-bit timer, with two PWM outputs (9 and 10)
+  // Timer2 is 8-bits and one PWM output
+  // https://docs.arduino.cc/tutorials/generic/secrets-of-arduino-pwm/
   cli();  //stop interrupts while we run the setup, just in case...  
   // Change the PWM base frequency from the standard 488Hz to 3.906 Hz, this helps filtering to DC.
   TCCR1B = TCCR1B & 0b11111000 | 0x02;
   pinMode(pwmPin, OUTPUT);  // sets the PWM pin as output, to act like a DAC
 
-  // set timer0 to 1ms interrupts
+  // set timer0 to 1ms interrupts (timer 0 is also used for millis() and delay())
   TCCR0A = 0; // reset the timer from previous settings 
   TCCR0B |= (1 << WGM02)|(1 << CS01)|(1 << CS00);  
   OCR0A = 0xF9;  
@@ -209,8 +193,8 @@ void setup()
   attachInterrupt(0, enc_a_isr,RISING);
   attachInterrupt(1, enc_b_isr,RISING);
 
-  // manually setting the measurement mode
-  mode = resistance;
+  // setting the startup measurement mode
+  mode = current;
 }
 
 
@@ -232,7 +216,7 @@ ISR(TIMER0_COMPA_vect){//timer0 interrupt
   cli();//stop interrupts
 
   if (Measurement_completed == 0){
-    digitalWriteFast(PIN_DEBUG, HIGH); // optional: show start of cycle on a scope
+    //digitalWriteFast(PIN_DEBUG, HIGH); // optional: show start of cycle on a scope
     /* for software RMS sampling of the DUT voltage : not used
     read_dut_Rms.update(analogRead(DUT_INPUT)); // for BLR_ON or for DC(+AC) signals with BLR_OFF
     */
@@ -243,7 +227,7 @@ ISR(TIMER0_COMPA_vect){//timer0 interrupt
     period_counter = 1;
     Measurement_completed = 1;
   }
-  digitalWriteFast(PIN_DEBUG, LOW); // optional: show ending on scope
+  //digitalWriteFast(PIN_DEBUG, LOW); // optional: show ending on scope
   sei();//allow interrupts
 }
 
@@ -252,10 +236,42 @@ void loop() {
   int temp; // used in the value calculations
 
   // check the mode we're in, read the switch
-  int measure_mode = digitalRead(DUT_Mode); // High is AC, low is DC
+  measure_mode = digitalRead(DUT_Mode); // High is AC, low is DC
+
+  // Is a different mode selection requested?
+  if (digitalRead(enc_But) == LOW){
+    Serial.println("button pressed");
+    delay(.5); // debounce
+    while (digitalRead(enc_But) == 0){ // while pressed, do nothing
+    }
+    // cycle through the modes
+    switch (mode){
+      case current:
+        mode = power;
+        // reset the output to avoid DUT issues
+        encoderPos = 0;
+        DAC = 0;
+      break;
+      case power:
+        mode = resistance;
+        // reset the output to avoid DUT issues
+        encoderPos = 0;
+        DAC = 0;
+      break;
+      case resistance:
+        mode = current;
+        // reset the output to avoid DUT issues
+        encoderPos = 0;
+        DAC = 0;
+      break;
+    }
+    send_mode();
+    Serial.print("new mode = : ");
+    Serial.println(modeStrings[mode]); 
+  }
 
   // read the rotary encoder switch value and set the PWM/DAC output accordingly
-  // 0..255 is 0..5V in 20mV/mA/mW/mOhm steps 
+  // 0..255 is 0..5V in 20mA/mW/mOhm steps 
   if(prev_encoderPos != encoderPos) {
     prev_encoderPos = encoderPos;
     // send the encoder setting and the mode suffix to the OLED display
@@ -331,9 +347,9 @@ void loop() {
   } // end of DC mode calculations   
 
 
-  // Depending on the mode (CC, CV.CW, CR), we use the encoder to set the mode factor
-  // So in CC, we set the current with the decoder, in the CV mode, we set the voltage
-  // in the CW mode we set the wattage and in the CR mode we set the resistance
+  // Depending on the mode (CC, CW, CR), we use the encoder to set the mode factor
+  // So in CC, we set the current (in mA) with the decoder, in the CW mode we set the power (in mWatt) 
+  // and in the CR mode we set the resistance in mOhm
   switch (mode)
     {
       case current:
@@ -388,18 +404,24 @@ void loop() {
 
   // output the DAC value to set the DUT current
   analogWrite(pwmPin, DAC); // DAC 0..255
-  // display the DAC value on the OLED display 
 
+  // to limit the number of OLED display updates, only do that every .5 seconds
   if (counter == 500){
+    //OLED updates are 20-90mS
+    //digitalWriteFast(PIN_DEBUG, !digitalRead(PIN_DEBUG)); // optional: show duration of cycle on a scope
     display_values();
     send_to_monitor(); // for debugging 
+    //digitalWriteFast(PIN_DEBUG, !digitalRead(PIN_DEBUG)); // optional: show duration of cycle on a scope
   }
 
   if (counter > 500){
     counter = 0;
   }
   counter++;
-  delay(1);
+
+  //delay(1); // for debugging only to slow down the loop
+  digitalWriteFast(PIN_DEBUG, !digitalRead(PIN_DEBUG)); // optional: show duration of cycle on a scope
+  // current looptime is 1.8mS
 
 } // end-of loop()
 
@@ -467,7 +489,7 @@ void send_current(){
   tft.setTextColor(GREEN);
   tft.setFont(&FreeSans18pt7b);
   tft.setTextSize(1);
-  tft.fillRect(digit_1, a_line-25, digit_4+22, 27, BLACK); // clear digits with a black rectangular
+  tft.fillRect(digit_1, a_line-25, digit_4+22, 27, BLACK); // clear digit field with a black rectangular
   if (shuntV > 9.99){ // shift the display one digit to the left
     tft.setCursor(digit_1, a_line);     
   }else{
@@ -477,7 +499,7 @@ void send_current(){
 }
 
 void send_power(){
-  tft.fillRect(digit_1, p_line, digit_4+22, 20, BLACK);  // p-line block clear with a black rectangular
+  tft.fillRect(digit_3-4, p_line+2, 50, 20, BLACK);  // p-line block clear with a black rectangular
   tft.setTextColor(WHITE);
   tft.setFont(&FreeSans9pt7b);
   tft.setTextSize(1);
@@ -489,41 +511,64 @@ void send_power(){
   tft.print(String(dutPower));  // send to OLED display
 }
 
-void send_encoder(){
-  tft.fillRect(digit_3+8, stat_line-12, 128, 20, BLACK); // Status block clear with a black rectangular
+void send_encoder(){ // this is the encoder value converted into mA/mW/mOhm
+  tft.fillRect(digit_3+6, stat_line-15, 45, 20, BLACK); // Status block clear with a black rectangular
   tft.setTextColor(WHITE);
   tft.setFont(&FreeSans9pt7b);
   tft.setTextSize(1);
   tft.setCursor(digit_3+8, stat_line); // from left side, down
   if (mode == resistance){
-    tft.print(encoderPos * 100 ); // nominal 10mX per click    
+    tft.print(encoderPos * 100 ); // nominal 100mOhm per click    
   }else{
-    tft.print(encoderPos * 10 ); // nominal 10mX per click
+    tft.print(encoderPos * 10 ); // nominal 10mA/10mW per click
   }
+}
+
+void send_dac(){ // This is for debugging purposes to keep track of what the DAC value is
+  tft.fillRect(digit_3+8, stat_line+5, 35, 20, BLACK); // Status line block clear with a black rectangular
+  tft.setTextColor(WHITE);
+  tft.setFont(&FreeSans9pt7b);
+  tft.setTextSize(1);
+  tft.setCursor(digit_1, stat_line+20); // from left side, down
+  tft.print("DAC");
+  tft.setCursor(digit_3+8, stat_line+20); // from left side, down, make room for 3 digits (255)
+  tft.print(DAC ); // DAC value
+}
+
+void send_acdc_input(){ // Update the mode information
+  tft.fillRect(digit_1, stat_line-15, 30, 20, BLACK); // field clear with a black rectangular
+  tft.setTextColor(WHITE);
+  tft.setFont(&FreeSans9pt7b);
+  tft.setTextSize(1);
+  tft.setCursor(0, stat_line); // from left side, down
+  if (measure_mode == LOW){ 
+    tft.print("DC");
+  }else{
+    tft.print("AC");  
+  }
+}
+
+
+
+void send_mode(){
+  // print the ac/dc mode
+  tft.fillRect(0, p_line+2, 30, 20, BLACK);
+  tft.setTextColor(GREEN);
+  tft.setFont(&FreeSans9pt7b);
+  tft.setTextSize(1);
+  tft.setCursor(0, p_line+17); // from left side, down
+  tft.print(modeStrings[mode]);
+
+  // update the encoder suffix (mA, mW, mR)
+  tft.setTextColor(WHITE);
+  tft.fillRect(digit_5+5, stat_line-15, 45, 20, BLACK); // block clear with a black rectangular
   tft.setCursor(digit_5+10, stat_line); // from left side, down
   tft.print(suffixStrings[mode]); 
 }
 
-void send_dac(){
-  tft.fillRect(digit_3+8, stat_line+6, 128, 20, BLACK); // Status line block clear with a black rectangular
-  tft.setTextColor(WHITE);
-  tft.setFont(&FreeSans9pt7b);
-  tft.setTextSize(1);
-  tft.setCursor(digit_3+8, stat_line+20); // from left side, down
-  tft.print(DAC ); // DAC value
-}
 
-void send_mode(){
-  tft.fillRect(digit_1, stat_line-15, 30, 20, BLACK); // mode field clear with a black rectangular
-  tft.setTextColor(BLUE);
-  tft.setFont(&FreeSans9pt7b);
-  tft.setTextSize(1);
-  tft.setCursor(0, stat_line); // from left side, down
-  tft.print(modeStrings[mode]);  
-}
 
-void send_to_monitor(){
-  // print the values to the IDE monitor
+void send_to_monitor(){  // print the values to the Arduino IDE serial monitor
   Serial.print(dutV,2);
   Serial.print(" V_rms\t");
 //    Serial.print(", ");
@@ -542,12 +587,12 @@ void send_to_monitor(){
 
   Serial.print(set_resistance);
   Serial.println(" mOhm");
-
 }
 
 
+
 void setup_oled_ac(){
-  // clear the display fields and show the suffixes
+  // clear the display fields and show the suffixes specific for the AC mode
   tft.fillRect(digit_1, v_line-24, 128, 27, BLACK); // V line clear with a black rectangular
   tft.fillRect(digit_1, a_line-24, 128, 27, BLACK); // A line
   tft.fillRect(digit_1, p_line, 128, 20, BLACK);  // P line
@@ -578,20 +623,15 @@ void setup_oled_ac(){
   tft.setTextSize(1);
   tft.setCursor(digit_5+10, p_line + 17); // from left side, down
   tft.print("W");  
-
-  // print the mode
-  tft.fillRect(digit_1, stat_line-12, 128, 20, BLACK); // V line clear with a black rectangular
-  tft.setTextColor(WHITE);
-  tft.setFont(&FreeSans9pt7b);
-  tft.setTextSize(1);
-  tft.setCursor(0, stat_line); // from left side, down
-  tft.print("AC");  
   
+  send_acdc_input();
+  send_mode();
+  send_dac();
 }
 
 
-void setup_oled_dc(){
-  // clear the display fields and show the suffixes
+void setup_oled_dc(){ 
+  // clear the display fields and show the suffixes specific for the DC mode
   tft.fillRect(digit_1, v_line-24, 128, 27, BLACK); // V line clear with a black rectangular
   tft.fillRect(digit_1, a_line-24, 128, 27, BLACK); // A line
   tft.fillRect(digit_1, p_line, 128, 20, BLACK);  // P line
@@ -612,17 +652,16 @@ void setup_oled_dc(){
   tft.setTextColor(WHITE);
   tft.setFont(&FreeSans9pt7b);
   tft.setTextSize(1);
-  tft.setCursor(digit_5+10, p_line + 17); // from left side, down
+  tft.setCursor(digit_5+10, p_line+17); // from left side, down
   tft.print("W");  
-  /*
-  // print the mode
-  tft.fillRect(digit_1, stat_line-12, 128, 20, BLACK); // stat line clear with a black rectangular
-  tft.setTextColor(WHITE);
-  tft.setFont(&FreeSans9pt7b);
-  tft.setTextSize(1);
-  tft.setCursor(0, stat_line); // from left side, down
-  tft.print("DC");  
-  */
+
+  // print the encoder suffix (mA, mW or mR)
+  tft.setCursor(digit_5+10, stat_line); // from left side, down
+  tft.print(suffixStrings[mode]); 
+
+  send_acdc_input();
+  send_mode();
+  send_dac();
 }
 
 
