@@ -14,14 +14,15 @@
 #include <SPI.h>  // communication method for the display
 #include <TrueRMS.h>  // True RMS library: https://github.com/MartinStokroos/TrueRMS
 
-#define PIN_DEBUG 12     // D12 optional: to trace rms interrupt activity on a scope
+#define PIN_DEBUG 12    // D12 optional: to trace rms interrupt activity on a scope
 #define DUT_INPUT A0    // the ADC input for the DUT voltage
 #define SHUNT_INPUT A2  // the ADC input for the DUT current
+
 
 // Rotary Encoder setup
 static int enc_A = 2; // D2 No filter caps used!
 static int enc_B = 3; // D3 No filter caps used!
-static int enc_But = 7; // ADC7 - No filter caps used!
+static int enc_But = A3; // ADC3 - No filter caps used!
 volatile byte aFlag = 0; // expecting a rising edge on pinA encoder has arrived at a detent
 volatile byte bFlag = 0; // expecting a rising edge on pinB encoder has arrived at a detent (opposite direction to when aFlag is set)
 volatile byte encoderPos = 0; //current value of encoder position (0-255). Change to int or uin16_t for larger values
@@ -32,6 +33,11 @@ volatile byte reading = 0; //store the direct values we read from our interrupt 
 int pwmPin = 9;      // D9 PWM output (OC1A) connected to digital pin 9 with increased frequency of 4KHz
 double const DACcalibAC = 1.0; // adjust the DAC for AC current output levels to match settings
 double const DACcalibDC = 1.0; // adjust the DAC for DC current output levels to match settings
+
+// faster ADC read with 76.8 KHz sample rate 
+// https://yaab-arduino.blogspot.com/2015/02/fast-sampling-from-analog-input.html
+#define cbi(sfr, bit) (_SFR_BYTE(sfr) &= ~_BV(bit))
+#define sbi(sfr, bit) (_SFR_BYTE(sfr) |= _BV(bit))
 
 // SSD1531 SPI declarations
 // Screen dimensions
@@ -81,7 +87,7 @@ int digit_4 = 66;
 int digit_5 = 86;
 
 // setup the AD-DC mode switching
-#define DUT_Mode 10 // use pin D10 for the toggle switch
+#define DUT_Mode A5 // use pin ADC5 for the toggle switch
 boolean ac_mode_setup = false; // default for the startup
 boolean dc_mode_setup = false;
 boolean measure_mode; // ac or dc input mode
@@ -159,11 +165,16 @@ void setup()
   pinMode(attnPin, OUTPUT);
   digitalWrite(attnPin, LOW); // set the attenuator in the 40V setting
 
-  //pinMode(enc_But, INPUT_PULLUP); // Encoder push button
+  pinMode(enc_But, INPUT_PULLUP); // Encoder push button
 
   analogReference(INTERNAL); // Nano to use the internal 1.1V reference 
-  analogRead(A7);  // force the voltage reference setting to be used and avoid an internal short
-    
+  analogRead(A0);  // force the voltage reference setting to be used and avoid an internal short
+
+  // faster ADC read with 76.8 KHz sample rate
+  sbi(ADCSRA, ADPS2);
+  cbi(ADCSRA, ADPS1);
+  cbi(ADCSRA, ADPS0); 
+
   Serial.println("start tft");
   tft.begin();
   Serial.println("start OLED setup");
@@ -243,14 +254,13 @@ void loop() {
   int temp; // used in the value calculations
 
   // check the mode we're in, read the switch
-  measure_mode = digitalRead(DUT_Mode); // High is AC, low is DC
+  measure_mode = digitalRead(DUT_Mode); // High is DC, low is AC
   
   // Is a different mode selection requested?
-  // watch out, just reading the ADC once will give occasional false readings
-  if (readADC(A7, 2) < 10){ // normally at 0.8V or about 850
-    //Serial.println("-> button pressed");
-    //delayMicroseconds(100); // non-blocking 0.1s debounce delay
-    while (readADC(A7, 2) < 10){ // wait for the button to be released
+  if (digitalRead(enc_But) == LOW){
+      Serial.println("-> button pressed");
+      while (digitalRead(enc_But) == LOW){ // wait for the button to be released
+      Serial.println("-> button released");
     }
     // cycle through the modes
     switch (mode){
@@ -287,7 +297,7 @@ void loop() {
     send_encoder();
   } 
 
-  if (measure_mode == HIGH){ // we're measuring AC
+  if (measure_mode == LOW){ // we're measuring AC
     if(ac_mode_setup == false){
       setup_oled_ac();  // prepare the OLED display
       // stay in this mode but get ready for a switch to the AC mode selection
@@ -321,7 +331,7 @@ void loop() {
   } // end-of AC measurement mode
  
   /////// ===== DC Measurements
-  if (measure_mode == LOW){  // We're measuring DC
+  if (measure_mode == HIGH){  // We're measuring DC
     // note that in the DC mode, we do not set the global measurement_completed var so the Timer is not triggering the sampling 
     // we pick-up the ADC readings here during the normal loop execution, which is OK for DC signals.
     
@@ -365,14 +375,7 @@ void loop() {
       case current:
         // CC Mode
         set_current = encoderPos; // encoderPos is 100X current in mV
-        /*
-        Serial.print(encoderPos);
-        Serial.print("\t");
-        Serial.print(set_current);
-        Serial.print("\t");
-        Serial.print(shuntV*100);
-        Serial.print("\t");
-        */
+
         if (set_current > shuntV*100){ // shuntV is in mV for mA
           DAC++;
           if(DAC > 255){
@@ -384,7 +387,15 @@ void loop() {
             DAC = 0;
           }
         }
-        //Serial.println(DAC);
+        /* looking at the reaction time of the DAC based on the current
+        Serial.print(encoderPos);
+        Serial.print("\t");
+        Serial.print(set_current);
+        Serial.print("\t");
+        Serial.print(shuntV*100);
+        Serial.print("\t");
+        Serial.println(DAC);
+        */
         break;
       case power:
         // CP Mode
@@ -432,7 +443,7 @@ void loop() {
     //digitalWriteFast(PIN_DEBUG, !digitalRead(PIN_DEBUG)); // optional: show duration of cycle on a scope
     display_values();
     //send_to_monitor(); // for debugging 
-    digitalWriteFast(PIN_DEBUG, !digitalRead(PIN_DEBUG)); // optional: show duration of cycle on a scope
+    digitalWriteFast(PIN_DEBUG, !digitalReadFast(PIN_DEBUG)); // optional: show duration of cycle on a scope
   }
 
   if (counter > 500){
@@ -562,7 +573,7 @@ void send_acdc_input(){ // Update the mode information
   tft.setFont(&FreeSans9pt7b);
   tft.setTextSize(1);
   tft.setCursor(0, stat_line); // from left side, down
-  if (measure_mode == LOW){ 
+  if (measure_mode == HIGH){ 
     tft.print("DC");
   }else{
     tft.print("AC");  
