@@ -14,7 +14,7 @@
  * For the AC mode, the AD633 needs to be brought back into the circuit and we may need to activate the software controlling loop.
  * 
  */
- 
+#include <ezButton.h>  // Tutorial page: https://arduinogetstarted.com/tutorials/arduino-button-long-press-short-press
 #include <digitalWriteFast.h>
 #include <Adafruit_SSD1351.h> // 128x128 RGB OLED display
 #include <Adafruit_GFX.h> // needed for display
@@ -23,31 +23,34 @@
 #include <SPI.h>  // communication method for the display
 #include <TrueRMS.h>  // True RMS library: https://github.com/MartinStokroos/TrueRMS
 
-#define PIN_DEBUG 12    // D12 optional: to trace rms interrupt activity on a scope
-#define DUT_INPUT A0    // the ADC input for the DUT voltage
+//#define PIN_DEBUG 1    // D12 optional: to trace rms interrupt activity on a scope
+#define DUT_INPUT A0    // the ADC input for the AC DUT voltage after the LTC1966
+#define V_DUT A4        // the DC DUT voltage before the LTC1966
 #define SHUNT_INPUT A2  // the ADC input for the DUT current
-
+#define attnPin A3      // Rotary encoder push button
+#define enc_But 12      // Switch the input attenuator from 40V to 400V
 
 // Rotary Encoder setup
 static int enc_A = 2; // D2 No filter caps used!
 static int enc_B = 3; // D3 No filter caps used!
-static int enc_But = A3; // ADC3 - No filter caps used!
 volatile byte aFlag = 0; // expecting a rising edge on pinA encoder has arrived at a detent
 volatile byte bFlag = 0; // expecting a rising edge on pinB encoder has arrived at a detent (opposite direction to when aFlag is set)
 int encoderPos = 0; //current value of encoder position (0-400). Change to int or uin16_t for larger values
-int maxEncPos = 201; // actually 200=4A, limit the maximum setting of the encoder
+int maxEncPos = 4001; // actually, 4000=4A, limit the maximum setting of the encoder
 int prev_encoderPos = encoderPos; //stores the last encoder position to see if it has changed
 volatile byte reading = 0; //store the direct values we read from our interrupt pins before checking to see if we have moved a whole detent
+int encoderRes = 10;  // toggles between 10mA and 100mA step resolution
 
 // Setup the poor man's DAC by using a PWM based version
-int pwmPin = 9;      // D9 PWM output (OC1A) connected to digital pin 9 with increased frequency of 4KHz
+int pwmPin = 9;   // D9 PWM output (OC1A) connected to digital pin 9 with increased frequency of 4KHz
+                  // do not use D10 for normal use!
 double const DACcalibAC = 1.0; // adjust the DAC for AC current output levels to match settings
 double const DACcalibDC = 1.0; // adjust the DAC for DC current output levels to match settings
 
 // faster ADC read with 76.8 KHz sample rate 
 // https://yaab-arduino.blogspot.com/2015/02/fast-sampling-from-analog-input.html
-#define cbi(sfr, bit) (_SFR_BYTE(sfr) &= ~_BV(bit))
-#define sbi(sfr, bit) (_SFR_BYTE(sfr) |= _BV(bit))
+//#define cbi(sfr, bit) (_SFR_BYTE(sfr) &= ~_BV(bit))
+//#define sbi(sfr, bit) (_SFR_BYTE(sfr) |= _BV(bit))
 
 // SSD1531 SPI declarations
 // Screen dimensions
@@ -61,8 +64,6 @@ double const DACcalibDC = 1.0; // adjust the DAC for DC current output levels to
 #define cs   5  // OLED CS
 #define rst  6  // OLED RES
 
-// DUT input attenuator
-int attnPin = 10; // D10 is switch the input attenuator from 40V to 400V
 // DUT input relais
 int DUT_PWR = 7; // MOSFET switch to turn DUT power on/off port D7
 
@@ -83,9 +84,9 @@ int DUT_PWR = 7; // MOSFET switch to turn DUT power on/off port D7
 Adafruit_SSD1351 tft = Adafruit_SSD1351(cs, dc, rst); // others are defaults
 
 // OLED display vertical line positions
-int v_line = 25;    // Volt line 30
-int a_line = 57;    // Amp line 65
-int p_line = 62;    // Power line
+int v_line = 25;     // Volt line 30
+int a_line = 57;     // Amp line 65
+int p_line = 62;     // Power line
 int stat_line = 100; // Status line
 int menu_line = 118; // Menu line
 
@@ -112,14 +113,13 @@ double bridgeCal = 1.25; // bridge loss factor for AC mode
 double shuntV; // holds the shunt volt (current) value
 double prev_shuntV = 1.0; // keep track of value changes for display
 double const shuntVcalibAC = 1.0; // calibration of setting versus actual DUT current
-double const shuntVcalibDC = 3.0; // calibration of setting versus actual DUT current
+double const shuntVcalibDC = 4.0; // calibration of setting versus actual DUT current
 volatile int request_adc = 0;
 double const dc_offset_factor = 1.0; // voltage calibration factor for low voltages
 double const dc_cal_factor = 54; // attenuation and calibration factor for DUT voltage
 double const ac_cal_factor = 1.0; // calibration factor
 double const vScale = 1.0806; // measure the AREF with an actual DMM
-                            // and use that voltage in mVolt instead of the Vref
-double vOffset = 0.0;         // apply a low voltage and note the difference between the ADC reading and the applied voltage.
+double currOffset = 0.0;  // apply a low voltage and note the difference between the ADC reading and the applied voltage.
 double dutPower = 0.0; // holds the power in Watt calculation
 double prev_dutPower = 1.0; // keep track of value changes for display
 
@@ -150,6 +150,18 @@ int tempRaw = 0;
 
 int temp; // used in the value calculations
 
+// multiple button presses for the encoder
+const int SHORT_PRESS_TIME = 1000; // less than 1000 milliseconds
+const int LONG_PRESS_TIME  = 1000; // longer than 1000 milliseconds
+
+ezButton button(enc_But);  // create object that connects to the encoder Button
+
+unsigned long pressedTime  = 0;
+unsigned long releasedTime = 0;
+bool isPressing = false;
+bool isLongDetected = false;
+
+
 /*
  * Forward Function Declarations
  */
@@ -174,6 +186,40 @@ void oledSetup();
 void enc_a_isr();
 void enc_b_isr();
 
+/* a hack to create up to 16-bit PWM signals:
+ * https://forum.arduino.cc/index.php?topic=332431.0
+ * The above one is WRONG! Below is the correct one.
+ * https://arduino.stackexchange.com/questions/12718/increase-pwm-bit-resolution
+ *
+ * I use the 12-bit version because the resolution of the 10-bit counter is too 
+ * course to drive the error variations.
+ */
+void setupFastPWM() {
+  /* Changing ICR1 will effect the resolution and the frequency.
+  ICR1 = 0xffff; (65535) 16-bit resolution  244 Hz
+  ICR1 = 0x7fff; (32767) 15-bit resolution  488 Hz
+  ICR1 = 0x3fff; (16383) 14-bit resolution  977 Hz
+  ICR1 = 0x1fff;  (8192) 13-bit resolution 1953 Hz 
+  ICR1 = 0x0fff;  (4096) 12-bit resolution 3908 Hz
+  */
+  DDRB |= (1 << DDB1) | (1 << DDB2);
+  TCCR1A = (1 << COM1A1) | (1 << COM1B1) | (1 << WGM11);
+  TCCR1B = (1 << WGM12) | (1 << WGM13) | (1 << CS10);
+  OCR1A = 0;
+  ICR1 = 0x0fff; /* TOP counter value (freeing OCR1A)*/
+}
+
+
+/* xx-bit version of analogWrite(). Works only on pins 9 and 10. */
+void analogWriteFast(uint8_t pin, uint16_t val)
+{
+  switch (pin) {
+    case  9: OCR1A = val; break;
+    case 10: OCR1B = val; break;
+  }
+}
+
+
 
 /*
  * The initial setup code
@@ -182,22 +228,24 @@ void setup()
 {
   Serial.begin(9600); // for debugging
 
-  pinMode(PIN_DEBUG, OUTPUT); // optional: so we can show interrupt or loop duration activity on a scope
+  analogReference(INTERNAL); // Nano to use the internal 1.1V reference 
+  analogRead(DUT_INPUT);  // force the voltage reference setting to be used and avoid an internal short
+
+  //pinMode(PIN_DEBUG, OUTPUT); // optional: so we can show interrupt or loop duration activity on a scope
   pinMode(DUT_Mode, INPUT_PULLUP); // Mode switch, default is AC
   pinMode(DUT_PWR, OUTPUT); // DUT input on/off switch
   digitalWrite(DUT_PWR, HIGH); // set the input relais to on
   pinMode(attnPin, OUTPUT);
   digitalWrite(attnPin, LOW); // set the attenuator in the 40V setting
-
   pinMode(enc_But, INPUT_PULLUP); // Encoder push button
 
-  analogReference(INTERNAL); // Nano to use the internal 1.1V reference 
-  analogRead(A0);  // force the voltage reference setting to be used and avoid an internal short
+  // setup the encoder button debounce
+  button.setDebounceTime(50); // set debounce time to 50 milliseconds
 
   // faster ADC read with 76.8 KHz sample rate
-  sbi(ADCSRA, ADPS2);
-  cbi(ADCSRA, ADPS1);
-  cbi(ADCSRA, ADPS0); 
+  //sbi(ADCSRA, ADPS2);
+  //cbi(ADCSRA, ADPS1);
+  //cbi(ADCSRA, ADPS0); 
 
   Serial.println("start tft");
   tft.begin();
@@ -216,10 +264,13 @@ void setup()
   // we use pin 9 and Timer1, a 16-bit timer, with two PWM outputs (9 and 10)
   // Timer2 is 8-bits and one PWM output
   // https://docs.arduino.cc/tutorials/generic/secrets-of-arduino-pwm/
-  cli();  //stop interrupts while we run the setup, just in case...  
+  cli();  //stop interrupts while we run the register setups, just in case...  
   // Change the PWM base frequency from the standard 488Hz to 3.906 Hz, this helps filtering to DC.
-  TCCR1B = TCCR1B & 0b11111000 | 0x02;
+  //TCCR1B = TCCR1B & 0b11111000 | 0x02;
   pinMode(pwmPin, OUTPUT);  // sets the PWM pin as output, to act like a DAC
+  setupFastPWM();
+  analogWriteFast(pwmPin, 0); // set the DAC to 0
+
 
   // set timer0 to 1ms interrupts (timer 0 is also used for millis() and delay())
   TCCR0A = 0; // reset the timer from previous settings 
@@ -278,42 +329,66 @@ ISR(TIMER0_COMPA_vect){//timer0 interrupt
  */
 void loop() {
   int temp; // used in the value calculations
+  
+  button.loop(); // activate the button function
 
   // check the input measurement mode we're in, read the switch
   input_mode = digitalRead(DUT_Mode); // High is DC input, low is AC input
   
-  // Is a different mode selection requested?
-  if (digitalRead(enc_But) == LOW){
-      Serial.println("-> button pressed");
-      while (digitalRead(enc_But) == LOW){ // wait for the button to be released
-      Serial.println("-> button released");
-      }
-    // cycle through the modes
-    switch (mode){
-      case current:
-        mode = power;
-        // reset the output to avoid DUT issues
-        encoderPos = 0;
-        DAC = 0;
-      break;
-      case power:
-        mode = resistance;
-        // reset the output to avoid DUT issues
-        encoderPos = 0;
-        DAC = 0;
-      break;
-      case resistance:
-        mode = current;
-        // reset the output to avoid DUT issues
-        encoderPos = 0;
-        DAC = 0;
-      break;
-    }
-    send_mode(); // to OLED display
-    //Serial.print("new mode = : "); // send to serial monitor
-    //Serial.println(modeStrings[mode]); 
+  if(button.isPressed()){
+    pressedTime = millis();
+    isPressing = true;
+    isLongDetected = false;
   }
 
+  if(button.isReleased()) {
+    isPressing = false;
+    releasedTime = millis();
+    long pressDuration = releasedTime - pressedTime;
+    // make sure that this does not run right after the long click
+    if((pressDuration < SHORT_PRESS_TIME) && isLongDetected == false){ 
+      // cycle through the modes
+      switch (mode){
+        case current:
+          mode = power;
+          // reset the output to avoid DUT issues
+          encoderPos = 0;
+          DAC = 0;
+        break;
+        case power:
+          mode = resistance;
+          // reset the output to avoid DUT issues
+          encoderPos = 0;
+          DAC = 0;
+        break;
+        case resistance:
+          mode = current;
+          // reset the output to avoid DUT issues
+          encoderPos = 0;
+          DAC = 0;
+        break;
+      }
+      send_mode(); // to OLED display
+      Serial.print("new mode = : "); // send to serial monitor
+      Serial.println(modeStrings[mode]); 
+    }
+  }
+
+  if(isPressing == true && isLongDetected == false) {
+    long pressDuration = millis() - pressedTime;
+
+    if( pressDuration > LONG_PRESS_TIME ) {
+      Serial.print("Resolution change toggle");
+      isLongDetected = true;
+      if (encoderRes == 10){
+        encoderRes = 100;
+      }else{
+        if (encoderRes == 100){
+          encoderRes = 10;
+        }
+      }
+    }
+  }
 
   // read the rotary encoder switch value and set the PWM/DAC output accordingly
   // 0..255 is 0..5V in 20mA/mW/mOhm steps 
@@ -347,69 +422,41 @@ void loop() {
     }
     dc_measurement();
   }
-  //// ===== Dynamic Software Loop
+  //// ===== Setup the measurement mode
   // Depending on the mode (CC, CW, CR), we use the encoder to set the mode factor
   // So in CC, we set the current (in mA) with the decoder, in the CW mode we set the power (in mWatt) 
   // and in the CR mode we set the resistance in mOhm
-  // The software controlling loop determines the setting of the current based on the measured results
   switch (mode)
     {
       case current: // Constant Current Mode
-        set_current = encoderPos * 2; // encoderPos is current in 20mV clicks
-        //currentComp = shuntV*100; // and cast to int
-        // if (set_current > currentComp){ // shuntV is in mV for mA
-        //   DAC++;
-        //   DAC = constrain(DAC,0,254);
-        // }else{
-        //   DAC--;
-        //   DAC = constrain(DAC,0,254);
-        // }
+        set_current = encoderPos * encoderRes; // encoderPos is current in 10mV or 100mV clicks
+        DAC = constrain(set_current, 0, maxEncPos);
+        analogWriteFast(pwmPin, DAC);
         break;
       case power: // Constant Power Mode
-        set_power = encoderPos; // 10mW per click
-        // if (set_power > int(dutPower*100)){ // 
-        //   DAC++;
-        //   DAC = constrain(DAC,0,254);
-        // }else{
-        //   DAC--;
-        //   DAC = constrain(DAC,0,254);
-        // }
+        set_power = encoderPos / dutV * 10 * encoderRes; // 10mW or 100mW per click
+        DAC = constrain(set_power, 0, maxEncPos);
+        analogWriteFast(pwmPin, DAC);
         break;
-      case resistance: // Constant Resistance Mode
-        set_resistance = int(encoderPos*100); // 100mOhm per click
-
-        // if (set_resistance > int(shuntV*1000)){ //
-        //   DAC++;
-        //   DAC = constrain(DAC,0,254);
-        // }else{
-        //   DAC--;
-        //   DAC = constrain(DAC,0,254);
-        // }
+      case resistance: // Constant Resistance Mode : ***** needs more work!
+        // in this mode, a small encoder pos means a high current
+        // we need to reverse the encoder to reduce the resistance, not increase it    
+        set_resistance = dutV / encoderPos * encoderRes * 10; // 100mOhm or 1 Ohm per click
+        DAC = constrain(set_resistance, 0, maxEncPos);
+        analogWriteFast(pwmPin, DAC);
         break;
     }
-  // looking at the reaction time of the DAC based on the current
-  // Serial.print(encoderPos);
-  // Serial.print("\t");
-  // Serial.print(set_current);
-  // Serial.print("\t");
-  // Serial.print(int(shuntV*100));
-  // Serial.print("\t");
-  // Serial.print(shuntV);
-  // Serial.print("\t");
-  // Serial.print(currentComp);
-  // Serial.print("\t");
-  // Serial.println(DAC);
-
-  /// ===== End of Dynamic Loop
 
   // Prevent the MOSFET's from going fully open when there is no DUT.
   if (dutV < 1){
     DAC = 0;
   }
 
-  /// ===== Set the desired current by programming the DAC
-  DAC = constrain(encoderPos,0,maxEncPos); // 200 max = 4A
-  analogWrite(pwmPin, DAC);
+
+  if (prev_DAC != DAC){
+    send_dac();
+    prev_DAC = DAC;
+  }
 
   // calculate the DUT Power in Watts
   dutPower = dutV * shuntV;
@@ -421,7 +468,7 @@ void loop() {
     //OLED updates are 20-90mS
     //digitalWriteFast(PIN_DEBUG, !digitalRead(PIN_DEBUG)); // optional: show duration of SPI cycle on a scope
     display_values();
-    //send_to_monitor(); // send to Arduino serial monitor for debugging 
+    send_to_monitor(); // send to Arduino serial monitor for debugging 
     // Read the temperature sensor, every .5s is enough
     tempRaw = readADC(LM35, readAvg);
     temperature = tempRaw * vScale / 1024 * 100; // mv/degree C
@@ -436,7 +483,7 @@ void loop() {
   //delay(100); // for debugging only to slow down the loop
 
   //// ==== This is optional so we can look at the loop duration on a DSO
-  digitalWriteFast(PIN_DEBUG, !digitalRead(PIN_DEBUG));
+  //digitalWriteFast(PIN_DEBUG, !digitalRead(PIN_DEBUG));
   // current looptime is 1.8mS
 
 } // end-of main loop()
@@ -452,7 +499,7 @@ void ac_measurement() {
     // The True RMS calculation for the DUT voltage is done by the LTC1966
     // The output from the LTC1966 is 0..1V DC
     double dutVraw = readADC(DUT_INPUT, readAvg); // read the LTC output, avg
-    dutVraw = ((dutVraw + vOffset) * vScale) /1024;  // adc bits to Volt conversion
+    dutVraw = ((dutVraw + currOffset) * vScale) /1024;  // adc bits to Volt conversion
     dutVraw = (dutVraw * 100) + bridgeCal;  // compensate for the /100 input divider add the bridge loss factor
     dutV = dutVraw * ac_cal_factor; // add a calibration factor       
 
@@ -465,7 +512,7 @@ void ac_measurement() {
     Measurement_completed = 0; // restart the rms measurement cycle
 
     // output the DAC value
-    analogWrite(pwmPin, encoderPos * DACcalibAC); // AC mode 0..255
+    analogWriteFast(pwmPin, encoderPos * DACcalibAC); // AC mode
   }
 }
 
@@ -473,9 +520,9 @@ void ac_measurement() {
  * DC Input Measurements
  */
 void dc_measurement(){
-  // The calculation for the DUT voltage is done by the LTC1966
+  // The calculation for the DUT voltage is taken from before the LT1966 so it's more accurate
   // obtain the output and calculate the DC DUT voltage
-  double dutVraw = readADC(DUT_INPUT, readAvg); // avg 
+  double dutVraw = readADC(V_DUT, readAvg); // avg 
   dutVraw = dutVraw * vScale / 1024;  // adc bits to Volt conversion
   dutV = (dutVraw * dc_cal_factor); // account for input divider and add a calibration factor
   temp = (int (dutV * 100));   // use a trick forcing only two decimals
@@ -485,7 +532,7 @@ void dc_measurement(){
   // We read the voltage across the sense resistor
   // The voltage across the shunt is multiplied by 5 to get 100mA = 100mV
   double shuntVraw = readADC(SHUNT_INPUT, readAvg); // adc to Volt conversion, avg 
-  shuntV = ((shuntVraw + vOffset) * vScale) / 1024; // adc bits to Volt conversion
+  shuntV = ((shuntVraw + currOffset) * vScale) / 1024; // adc bits to Volt conversion
   shuntV = shuntV * shuntVcalibDC; // add the calibration factors
   temp = (int (shuntV * 100)); // use a trick forcing only two decimals
   shuntV = double (temp) / 100; 
@@ -589,16 +636,23 @@ void send_power(){
  * This is the encoder value converted into mA/mW/mOhm
  */
 void send_encoder(){ 
-  tft.fillRect(digit_3+6, stat_line-15, 45, 20, BLACK); // Status block clear with a black rectangular
+  tft.fillRect(digit_3, stat_line-15, 45, 20, BLACK); // Status block clear with a black rectangular
   tft.setTextColor(WHITE);
   tft.setFont(&FreeSans9pt7b);
   tft.setTextSize(1);
-  tft.setCursor(digit_3+8, stat_line); // from left side, down
-  if (mode == resistance){
-    tft.print(encoderPos * 200 ); // nominal 200mOhm per click    
-  }else{
-    tft.print(encoderPos * 20 ); // nominal 20mA/20mW per click
-  }
+  tft.setCursor(digit_3+2, stat_line); // from left side, down
+    switch (mode)
+    {
+      case current: // Constant Current Mode
+        tft.print(encoderPos * encoderRes); // nominal 10mA per click 
+        break;
+      case power: // Constant Power Mode
+        tft.print(encoderPos * encoderRes * 10); // nominal 100mW per click 
+        break;
+      case resistance: // Constant Resistance Mode : ***** needs more work!
+        tft.print(encoderPos * encoderRes); // nominal 100mOhm per click 
+        break;
+    }
 }
 
 /*
@@ -829,6 +883,10 @@ void send_to_monitor(){
   Serial.print(" Watt\t"); 
 
   Serial.print(DAC);
+  Serial.print("\t");
+
+  Serial.print("resistance: ");
+  Serial.print(int(dutV/shuntV));
   Serial.print("\t");
 
   Serial.print(set_resistance);
